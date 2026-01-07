@@ -1,0 +1,25 @@
+fastapi==0.109.0
+uvicorn==0.27.0
+pydantic==2.6.0
+httpx==0.26.0
+mitmproxy==10.2.1
+python-multipart
+pyzmq
+# AI Libraries (Heavyweights - ensure system has capacity or use mocked inference for dev)
+torch --index-url https://download.pytorch.org/whl/cpu
+transformers
+ultralytics
+paddlepaddle
+paddleocr
+Pillow
+sentence-transformers
+# Document Tools
+layoutlmv3
+pdfminer.six
+yara-python
+# Text Tools
+spacy
+presidio-analyzer
+presidio-anonymizer
+tree-sitter
+semgrep
