@@ -71,6 +71,28 @@
                 </div>
             </div>
             <div class="col-md-4">
+                <!-- Manual Upload Card -->
+                <div class="card mb-3">
+                    <div class="card-header">Manual Analysis Test</div>
+                    <div class="card-body">
+                        <form id="upload-form">
+                            <div class="mb-3">
+                                <label class="form-label">Select File (Image/Doc)</label>
+                                <input type="file" class="form-control" id="test-file" required>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label">Type</label>
+                                <select class="form-select" id="test-type">
+                                    <option value="image">Image</option>
+                                    <option value="document">Document</option>
+                                </select>
+                            </div>
+                            <button type="submit" class="btn btn-primary w-100">Upload & Analyze</button>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- Test Controls Card -->
                 <div class="card">
                     <div class="card-header">Test Controls</div>
                     <div class="card-body">
@@ -81,7 +103,7 @@
                         </div>
                         <hr>
                         <h6>Traffic Volume</h6>
-                        <canvas id="trafficChart"></canvas>
+                        <canvas id="trafficChart" height="200"></canvas>
                     </div>
                 </div>
             </div>
@@ -148,6 +170,30 @@
                 alert("Failed to send test");
             }
         }
+
+        document.getElementById('upload-form').onsubmit = async (e) => {
+            e.preventDefault();
+            const fileInput = document.getElementById('test-file');
+            const typeInput = document.getElementById('test-type');
+            
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+            formData.append('content_type', typeInput.value);
+            formData.append('source_ip', '127.0.0.1');
+            formData.append('destination_ip', 'dashboard-test');
+
+            try {
+                const resp = await fetch(`${API_URL}/analyze_traffic`, {
+                    method: 'POST',
+                    body: formData
+                });
+                const result = await resp.json();
+                alert(`Analysis Complete: ${result.status.toUpperCase()}\nReason: ${result.reason}`);
+                fetchStats();
+            } catch (err) {
+                alert("Upload failed: " + err);
+            }
+        };
 
         window.onload = () => {
             initChart();
