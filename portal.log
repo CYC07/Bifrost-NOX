@@ -1,0 +1,6 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/cyc0logy/FYP/ai_firewall/captive_portal/app.py", line 1, in <module>
+    from flask import Flask
+ModuleNotFoundError: No module named 'flask'

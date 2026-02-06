@@ -1,4 +1,4 @@
-INFO:     Started server process [748050]
+INFO:     Started server process [290044]
 INFO:     Waiting for application startup.
 INFO:image_service:Loading Semantic Model: openai/clip-vit-base-patch32...
 Using a slow image processor as `use_fast` is unset and a slow processor was saved with this model. `use_fast=True` will be the default behavior in v4.52, even if the model was saved with a slow processor. This will result in minor differences in outputs. You'll still be able to use a slow processor with `use_fast=False`.
@@ -7,22 +7,7 @@ INFO:image_service:Loading YOLOv8 Nano...
 INFO:image_service:YOLO Model Loaded.
 INFO:     Application startup complete.
 INFO:     Uvicorn running on http://0.0.0.0:8001 (Press CTRL+C to quit)
-INFO:image_service:Analyzing image: images.jpeg (177x285)
-INFO:image_service:CLIP: nsfw nude explicit sexual content score=0.6564323902130127
-INFO:     127.0.0.1:40854 - "POST /analyze HTTP/1.1" 200 OK
-INFO:image_service:Analyzing image: images.jpeg (177x285)
-INFO:image_service:CLIP: nsfw nude explicit sexual content score=0.6564323902130127
-INFO:     127.0.0.1:52576 - "POST /analyze HTTP/1.1" 200 OK
-INFO:image_service:Analyzing image: 251373.jpg (2639x3499)
-ERROR:image_service:OCR Error: image file is truncated (4 bytes not processed)
-INFO:image_service:CLIP: nsfw nude explicit sexual content score=0.8288863301277161
-INFO:     127.0.0.1:40200 - "POST /analyze HTTP/1.1" 200 OK
-INFO:image_service:Analyzing image: nimg1.jpeg (195x258)
-INFO:image_service:Analyzing image: nimg1.jpeg (195x258)
-INFO:image_service:CLIP: nsfw nude explicit sexual content score=0.6074670553207397
-INFO:     127.0.0.1:42038 - "POST /analyze HTTP/1.1" 200 OK
-INFO:image_service:CLIP: nsfw nude explicit sexual content score=0.6074670553207397
-INFO:     127.0.0.1:42052 - "POST /analyze HTTP/1.1" 200 OK
-INFO:image_service:Analyzing image: babi-Lf9JpqXS--0-unsplash.webp (320x414)
-INFO:image_service:CLIP: nsfw nude explicit sexual content score=0.9102693200111389
-INFO:     127.0.0.1:43892 - "POST /analyze HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [248436]

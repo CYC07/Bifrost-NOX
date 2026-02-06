@@ -1,9 +1,7 @@
-# Core Web & Proxy
-fastapi==0.109.0
-uvicorn==0.27.0
-pydantic==2.6.0
-httpx==0.26.0
-mitmproxy==10.2.1
+starlette
+cryptography
+
+
 python-multipart
 pyzmq
 
@@ -22,7 +20,6 @@ numpy
 
 # Document Analysis
 pdfminer.six
-layoutlmv3
 yara-python
 
 # Text Analysis & NLP
