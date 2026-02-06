@@ -1,154 +1,0 @@
-INFO:     Started server process [290046]
-INFO:     Waiting for application startup.
-INFO:text_service:Loading NLP Models...
-INFO:sentence_transformers.SentenceTransformer:Use pytorch device_name: cpu
-INFO:sentence_transformers.SentenceTransformer:Load pretrained SentenceTransformer: all-MiniLM-L6-v2
-Batches:   0%|          | 0/1 [00:00<?, ?it/s]Batches: 100%|██████████| 1/1 [00:00<00:00, 13.43it/s]
-INFO:presidio-analyzer:nlp_engine not provided, creating default.
-INFO:presidio-analyzer:Created NLP engine: spacy. Loaded models: ['en']
-INFO:presidio-analyzer:registry not provided, creating default.
-INFO:presidio-analyzer:Loaded recognizer: CreditCardRecognizer
-INFO:presidio-analyzer:Loaded recognizer: CreditCardRecognizer
-INFO:presidio-analyzer:Loaded recognizer: CreditCardRecognizer
-INFO:presidio-analyzer:Loaded recognizer: CreditCardRecognizer
-INFO:presidio-analyzer:Loaded recognizer: UsBankRecognizer
-INFO:presidio-analyzer:Loaded recognizer: UsLicenseRecognizer
-INFO:presidio-analyzer:Loaded recognizer: UsItinRecognizer
-INFO:presidio-analyzer:Loaded recognizer: UsPassportRecognizer
-INFO:presidio-analyzer:Loaded recognizer: UsSsnRecognizer
-INFO:presidio-analyzer:Loaded recognizer: NhsRecognizer
-INFO:presidio-analyzer:Loaded recognizer: EsNifRecognizer
-INFO:presidio-analyzer:Loaded recognizer: EsNieRecognizer
-INFO:presidio-analyzer:Loaded recognizer: ItDriverLicenseRecognizer
-INFO:presidio-analyzer:Loaded recognizer: ItFiscalCodeRecognizer
-INFO:presidio-analyzer:Loaded recognizer: ItVatCodeRecognizer
-INFO:presidio-analyzer:Loaded recognizer: ItIdentityCardRecognizer
-INFO:presidio-analyzer:Loaded recognizer: ItPassportRecognizer
-INFO:presidio-analyzer:Loaded recognizer: PlPeselRecognizer
-INFO:presidio-analyzer:Loaded recognizer: CryptoRecognizer
-INFO:presidio-analyzer:Loaded recognizer: DateRecognizer
-INFO:presidio-analyzer:Loaded recognizer: EmailRecognizer
-INFO:presidio-analyzer:Loaded recognizer: IbanRecognizer
-INFO:presidio-analyzer:Loaded recognizer: IpRecognizer
-INFO:presidio-analyzer:Loaded recognizer: MedicalLicenseRecognizer
-INFO:presidio-analyzer:Loaded recognizer: PhoneRecognizer
-INFO:presidio-analyzer:Loaded recognizer: UrlRecognizer
-WARNING:presidio-analyzer:Recognizer not added to registry because language is not supported by registry - CreditCardRecognizer supported languages: es, registry supported languages: en
-WARNING:presidio-analyzer:Recognizer not added to registry because language is not supported by registry - CreditCardRecognizer supported languages: it, registry supported languages: en
-WARNING:presidio-analyzer:Recognizer not added to registry because language is not supported by registry - CreditCardRecognizer supported languages: pl, registry supported languages: en
-WARNING:presidio-analyzer:Recognizer not added to registry because language is not supported by registry - EsNifRecognizer supported languages: es, registry supported languages: en
-WARNING:presidio-analyzer:Recognizer not added to registry because language is not supported by registry - EsNieRecognizer supported languages: es, registry supported languages: en
-WARNING:presidio-analyzer:Recognizer not added to registry because language is not supported by registry - ItDriverLicenseRecognizer supported languages: it, registry supported languages: en
-WARNING:presidio-analyzer:Recognizer not added to registry because language is not supported by registry - ItFiscalCodeRecognizer supported languages: it, registry supported languages: en
-WARNING:presidio-analyzer:Recognizer not added to registry because language is not supported by registry - ItVatCodeRecognizer supported languages: it, registry supported languages: en
-WARNING:presidio-analyzer:Recognizer not added to registry because language is not supported by registry - ItIdentityCardRecognizer supported languages: it, registry supported languages: en
-WARNING:presidio-analyzer:Recognizer not added to registry because language is not supported by registry - ItPassportRecognizer supported languages: it, registry supported languages: en
-WARNING:presidio-analyzer:Recognizer not added to registry because language is not supported by registry - PlPeselRecognizer supported languages: pl, registry supported languages: en
-INFO:presidio-analyzer:Loaded recognizer: SpacyRecognizer
-INFO:text_service:NLP Models Loaded Successfully.
-INFO:     Application startup complete.
-INFO:     Uvicorn running on http://0.0.0.0:8003 (Press CTRL+C to quit)
-INFO:text_service:Analyzing text length: 243
-Batches:   0%|          | 0/1 [00:00<?, ?it/s]Batches: 100%|██████████| 1/1 [00:00<00:00,  3.31it/s]Batches: 100%|██████████| 1/1 [00:00<00:00,  3.29it/s]
-WARNING:presidio-analyzer:Entity IBAN doesn't have the corresponding recognizer in language : en
-INFO:     127.0.0.1:45862 - "POST /analyze HTTP/1.1" 200 OK
-INFO:text_service:Analyzing text length: 243
-Batches:   0%|          | 0/1 [00:00<?, ?it/s]Batches: 100%|██████████| 1/1 [00:00<00:00, 14.58it/s]
-WARNING:presidio-analyzer:Entity IBAN doesn't have the corresponding recognizer in language : en
-INFO:     127.0.0.1:45864 - "POST /analyze HTTP/1.1" 200 OK
-INFO:text_service:Analyzing text length: 243
-Batches:   0%|          | 0/1 [00:00<?, ?it/s]Batches: 100%|██████████| 1/1 [00:00<00:00, 14.39it/s]
-WARNING:presidio-analyzer:Entity IBAN doesn't have the corresponding recognizer in language : en
-INFO:     127.0.0.1:45872 - "POST /analyze HTTP/1.1" 200 OK
-INFO:text_service:Analyzing text length: 243
-Batches:   0%|          | 0/1 [00:00<?, ?it/s]Batches: 100%|██████████| 1/1 [00:00<00:00, 15.73it/s]
-WARNING:presidio-analyzer:Entity IBAN doesn't have the corresponding recognizer in language : en
-INFO:     127.0.0.1:45882 - "POST /analyze HTTP/1.1" 200 OK
-INFO:text_service:Analyzing text length: 243
-Batches:   0%|          | 0/1 [00:00<?, ?it/s]Batches: 100%|██████████| 1/1 [00:00<00:00, 14.59it/s]
-WARNING:presidio-analyzer:Entity IBAN doesn't have the corresponding recognizer in language : en
-INFO:     127.0.0.1:45892 - "POST /analyze HTTP/1.1" 200 OK
-INFO:text_service:Analyzing text length: 243
-Batches:   0%|          | 0/1 [00:00<?, ?it/s]Batches: 100%|██████████| 1/1 [00:00<00:00, 15.07it/s]
-WARNING:presidio-analyzer:Entity IBAN doesn't have the corresponding recognizer in language : en
-INFO:     127.0.0.1:60592 - "POST /analyze HTTP/1.1" 200 OK
-INFO:text_service:Analyzing text length: 243
-Batches:   0%|          | 0/1 [00:00<?, ?it/s]Batches: 100%|██████████| 1/1 [00:00<00:00,  9.50it/s]Batches: 100%|██████████| 1/1 [00:00<00:00,  9.46it/s]
-WARNING:presidio-analyzer:Entity IBAN doesn't have the corresponding recognizer in language : en
-INFO:     127.0.0.1:60602 - "POST /analyze HTTP/1.1" 200 OK
-INFO:text_service:Analyzing text length: 243
-Batches:   0%|          | 0/1 [00:00<?, ?it/s]Batches: 100%|██████████| 1/1 [00:00<00:00, 13.80it/s]
-WARNING:presidio-analyzer:Entity IBAN doesn't have the corresponding recognizer in language : en
-INFO:     127.0.0.1:60616 - "POST /analyze HTTP/1.1" 200 OK
-INFO:text_service:Analyzing text length: 243
-Batches:   0%|          | 0/1 [00:00<?, ?it/s]Batches: 100%|██████████| 1/1 [00:00<00:00, 13.55it/s]
-WARNING:presidio-analyzer:Entity IBAN doesn't have the corresponding recognizer in language : en
-INFO:     127.0.0.1:60620 - "POST /analyze HTTP/1.1" 200 OK
-INFO:text_service:Analyzing text length: 243
-Batches:   0%|          | 0/1 [00:00<?, ?it/s]Batches: 100%|██████████| 1/1 [00:00<00:00, 12.76it/s]
-WARNING:presidio-analyzer:Entity IBAN doesn't have the corresponding recognizer in language : en
-INFO:     127.0.0.1:60622 - "POST /analyze HTTP/1.1" 200 OK
-INFO:text_service:Analyzing text length: 243
-Batches:   0%|          | 0/1 [00:00<?, ?it/s]Batches: 100%|██████████| 1/1 [00:00<00:00,  9.60it/s]Batches: 100%|██████████| 1/1 [00:00<00:00,  9.56it/s]
-WARNING:presidio-analyzer:Entity IBAN doesn't have the corresponding recognizer in language : en
-INFO:     127.0.0.1:60624 - "POST /analyze HTTP/1.1" 200 OK
-INFO:text_service:Analyzing text length: 243
-Batches:   0%|          | 0/1 [00:00<?, ?it/s]Batches: 100%|██████████| 1/1 [00:00<00:00, 13.08it/s]
-WARNING:presidio-analyzer:Entity IBAN doesn't have the corresponding recognizer in language : en
-INFO:     127.0.0.1:60636 - "POST /analyze HTTP/1.1" 200 OK
-INFO:text_service:Analyzing text length: 243
-Batches:   0%|          | 0/1 [00:00<?, ?it/s]Batches: 100%|██████████| 1/1 [00:00<00:00, 15.60it/s]
-WARNING:presidio-analyzer:Entity IBAN doesn't have the corresponding recognizer in language : en
-INFO:     127.0.0.1:60646 - "POST /analyze HTTP/1.1" 200 OK
-INFO:text_service:Analyzing text length: 243
-Batches:   0%|          | 0/1 [00:00<?, ?it/s]Batches: 100%|██████████| 1/1 [00:00<00:00, 14.32it/s]
-WARNING:presidio-analyzer:Entity IBAN doesn't have the corresponding recognizer in language : en
-INFO:     127.0.0.1:60648 - "POST /analyze HTTP/1.1" 200 OK
-INFO:text_service:Analyzing text length: 243
-Batches:   0%|          | 0/1 [00:00<?, ?it/s]Batches: 100%|██████████| 1/1 [00:00<00:00, 14.40it/s]
-WARNING:presidio-analyzer:Entity IBAN doesn't have the corresponding recognizer in language : en
-INFO:     127.0.0.1:60658 - "POST /analyze HTTP/1.1" 200 OK
-INFO:text_service:Analyzing text length: 243
-Batches:   0%|          | 0/1 [00:00<?, ?it/s]Batches: 100%|██████████| 1/1 [00:00<00:00, 16.47it/s]
-WARNING:presidio-analyzer:Entity IBAN doesn't have the corresponding recognizer in language : en
-INFO:     127.0.0.1:60666 - "POST /analyze HTTP/1.1" 200 OK
-INFO:text_service:Analyzing text length: 243
-Batches:   0%|          | 0/1 [00:00<?, ?it/s]Batches: 100%|██████████| 1/1 [00:00<00:00, 12.19it/s]
-WARNING:presidio-analyzer:Entity IBAN doesn't have the corresponding recognizer in language : en
-INFO:     127.0.0.1:60670 - "POST /analyze HTTP/1.1" 200 OK
-INFO:text_service:Analyzing text length: 243
-Batches:   0%|          | 0/1 [00:00<?, ?it/s]Batches: 100%|██████████| 1/1 [00:00<00:00, 14.49it/s]
-WARNING:presidio-analyzer:Entity IBAN doesn't have the corresponding recognizer in language : en
-INFO:     127.0.0.1:60678 - "POST /analyze HTTP/1.1" 200 OK
-INFO:text_service:Analyzing text length: 243
-Batches:   0%|          | 0/1 [00:00<?, ?it/s]Batches: 100%|██████████| 1/1 [00:00<00:00, 14.45it/s]
-WARNING:presidio-analyzer:Entity IBAN doesn't have the corresponding recognizer in language : en
-INFO:     127.0.0.1:60694 - "POST /analyze HTTP/1.1" 200 OK
-INFO:text_service:Analyzing text length: 243
-Batches:   0%|          | 0/1 [00:00<?, ?it/s]Batches: 100%|██████████| 1/1 [00:00<00:00, 13.23it/s]
-WARNING:presidio-analyzer:Entity IBAN doesn't have the corresponding recognizer in language : en
-INFO:     127.0.0.1:60708 - "POST /analyze HTTP/1.1" 200 OK
-INFO:text_service:Analyzing text length: 243
-Batches:   0%|          | 0/1 [00:00<?, ?it/s]Batches: 100%|██████████| 1/1 [00:00<00:00, 14.99it/s]
-WARNING:presidio-analyzer:Entity IBAN doesn't have the corresponding recognizer in language : en
-INFO:     127.0.0.1:60722 - "POST /analyze HTTP/1.1" 200 OK
-INFO:text_service:Analyzing text length: 243
-Batches:   0%|          | 0/1 [00:00<?, ?it/s]Batches: 100%|██████████| 1/1 [00:00<00:00, 17.73it/s]
-WARNING:presidio-analyzer:Entity IBAN doesn't have the corresponding recognizer in language : en
-INFO:     127.0.0.1:60736 - "POST /analyze HTTP/1.1" 200 OK
-INFO:text_service:Analyzing text length: 243
-Batches:   0%|          | 0/1 [00:00<?, ?it/s]Batches: 100%|██████████| 1/1 [00:00<00:00, 14.95it/s]
-WARNING:presidio-analyzer:Entity IBAN doesn't have the corresponding recognizer in language : en
-INFO:     127.0.0.1:60748 - "POST /analyze HTTP/1.1" 200 OK
-INFO:text_service:Analyzing text length: 243
-Batches:   0%|          | 0/1 [00:00<?, ?it/s]Batches: 100%|██████████| 1/1 [00:00<00:00, 14.60it/s]
-WARNING:presidio-analyzer:Entity IBAN doesn't have the corresponding recognizer in language : en
-INFO:     127.0.0.1:60764 - "POST /analyze HTTP/1.1" 200 OK
-INFO:text_service:Analyzing text length: 243
-Batches:   0%|          | 0/1 [00:00<?, ?it/s]Batches: 100%|██████████| 1/1 [00:00<00:00, 14.50it/s]
-WARNING:presidio-analyzer:Entity IBAN doesn't have the corresponding recognizer in language : en
-INFO:     127.0.0.1:60774 - "POST /analyze HTTP/1.1" 200 OK
-INFO:text_service:Analyzing text length: 243
-Batches:   0%|          | 0/1 [00:00<?, ?it/s]Batches: 100%|██████████| 1/1 [00:00<00:00, 16.13it/s]
-WARNING:presidio-analyzer:Entity IBAN doesn't have the corresponding recognizer in language : en
-INFO:     127.0.0.1:60784 - "POST /analyze HTTP/1.1" 200 OK
