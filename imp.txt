@@ -1,0 +1,3 @@
+pkill -f "8001"
+./start_services.sh
+

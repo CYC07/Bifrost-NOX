@@ -54,8 +54,7 @@ zmq::socket_t brain_push_socket(zmq_context, zmq::socket_type::req); // Using RE
 // --- IPC HELPERS ---
 
 void init_zmq() {
-    printf("[CPP] Connecting to AI Brain via ZeroMQ (%s)...
-", ZMQ_ENDPOINT);
+    printf("[CPP] Connecting to AI Brain via ZeroMQ (%s)...\n", ZMQ_ENDPOINT);
     brain_push_socket.connect(ZMQ_ENDPOINT);
 }
 

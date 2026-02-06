@@ -1,5 +1,3 @@
-#!/bin/bash
-
 # 1. Clean up old rules
 iptables -F
 iptables -t nat -F
@@ -34,9 +32,16 @@ iptables -A OUTPUT -p tcp --dport 21 -j NFQUEUE --queue-num 1
 # This is "Transparent Proxying"
 # ... (Keep previous iptables rules) ...
 
-echo "Redirecting HTTP/HTTPS to mitmproxy..."
-iptables -t nat -A OUTPUT -p tcp --dport 80 -m owner ! --uid-owner $(id -u) -j REDIRECT --to-port 8080
+# Port 80 Redirect Removed for Open Network Mode
+
+echo "Redirecting HTTPS (443) to MITM Proxy (8080)..."
+# For Local Processes
 iptables -t nat -A OUTPUT -p tcp --dport 443 -m owner ! --uid-owner $(id -u) -j REDIRECT --to-port 8080
+# For Hotspot Clients (wlan1)
+iptables -t nat -A PREROUTING -i wlan1 -p tcp --dport 443 -j REDIRECT --to-port 8080
+
+echo "Enabling NAT Masquerading (wlan0 -> Internet)..."
+iptables -t nat -A POSTROUTING -o wlan0 -j MASQUERADE
 
 echo "Network Layer Rules Applied."
 
