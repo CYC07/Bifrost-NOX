@@ -4,11 +4,10 @@
 
 BIFROST NØX: AI-Driven APT Prevention Firewall
 
-
-  ![License] (https://img.shields.io/badge/license-MIT-blue.svg)
-  ![Python] (https://img.shields.io/badge/python-3.10%2B-green.svg)
-  ![AI] (https://img.shields.io/badge/AI-YOLOv8%20%7C%20NLP-orange.svg)
-  ![Security] (https://img.shields.io/badge/Security-NGFW%20%7C%20APT-red.svg)
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)
+![AI](https://img.shields.io/badge/AI-YOLOv8%20%7C%20NLP-orange.svg)
+![Security](https://img.shields.io/badge/Security-NGFW%20%7C%20APT-red.svg)
 
   > "BIFROST NØX is the bridge between raw network traffic and deep intelligence."
 
