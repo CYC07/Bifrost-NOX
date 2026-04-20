@@ -1,6 +1,22 @@
 *.log
 __pycache__/
 .env
-*.log
-__pycache__/
-.env
+.gemini/
+.gemini.md
+GEMINI.md
+.claude/
+.agent/
+.github/
+.pytest_cache/
+gha-creds-*.json
+tesseract-5.5.2/
+FIREWALL_COMPARISON.md
+system_arch.txt
+CLAUDE.md
+__init__.py
+/venv/
+gateway/certs/
+graphify-out/
+*.swp
+*.swo
+"Model installation/"
