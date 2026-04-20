@@ -65,16 +65,14 @@ Device (phone/laptop)
 
 ---
 
-## Requirements
-
-### System dependencies
-
-These must be installed before running `pip install`:
+## Installation
 
 ```bash
-# Debian / Kali / Ubuntu
-sudo apt update
-sudo apt install -y \
+git clone https://github.com/CYC07/Bifrost-NOX.git
+cd Bifrost-NOX
+
+# 1. System dependencies (Debian / Kali / Ubuntu)
+sudo apt update && sudo apt install -y \
     tesseract-ocr \
     libnetfilter-queue-dev \
     build-essential \
@@ -83,50 +81,7 @@ sudo apt install -y \
     python3-dev \
     python3-venv
 
-# Verify Tesseract is accessible
-tesseract --version
-```
-
-> **Note:** `pytesseract` (in `requirements.txt`) is only a Python wrapper — it requires the `tesseract-ocr` system binary to function.
-
-### Python dependencies
-
-```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
-
-> **YOLO weights** (`yolov8n.pt`) are downloaded automatically by `ultralytics` on first use — you do not need to download them manually.
-
-### Compile the C++ firewall engine
-
-```bash
-cd network_inspector/cpp
-make
-cd ../..
-```
-
----
-
-## Installation
-
-```bash
-git clone https://github.com/CYC07/Bifrost-NOX.git
-cd Bifrost-NOX
-
-# 1. System dependencies (see above)
-sudo apt install -y tesseract-ocr libnetfilter-queue-dev build-essential g++ libzmq3-dev python3-venv
-
-# 2. Python environment
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-
-# 3. Build C++ engine
-cd network_inspector/cpp && make && cd ../..
-
-# 4. Generate the local CA certificate (required for HTTPS interception)
+# 2. Generate the local CA certificate (required for HTTPS interception)
 cd gateway && python3 cert_utils.py && cd ..
 ```
 
