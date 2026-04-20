@@ -1,5 +1,13 @@
 # Bifrost NØX — AI-Driven Network Firewall
 
+![Python](https://img.shields.io/badge/Python-3.11-3776AB?style=for-the-badge&logo=python&logoColor=white)
+![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge&logo=opensourceinitiative&logoColor=white)
+![Platform](https://img.shields.io/badge/Platform-Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black)
+![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)
+![React](https://img.shields.io/badge/React_18-61DAFB?style=for-the-badge&logo=react&logoColor=black)
+![C++](https://img.shields.io/badge/C++-17-00599C?style=for-the-badge&logo=cplusplus&logoColor=white)
+![Status](https://img.shields.io/badge/Status-In_Development-orange?style=for-the-badge)
+
 An AI-powered transparent proxy firewall that intercepts, inspects, and classifies network traffic in real time using a multi-layered pipeline of specialised machine learning microservices. Built as a Final Year Project.
 
 ---
