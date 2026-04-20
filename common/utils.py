@@ -1,5 +1,31 @@
 import math
 import logging
+import os
+import sys
+
+def setup_logging(service_name: str):
+    log_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "logs"))
+    os.makedirs(log_dir, exist_ok=True)
+    
+    log_file = os.path.join(log_dir, f"{service_name}.log")
+    
+    # Configure root logger to output to both file and console
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    
+    formatter = logging.Formatter('%(asctime)s - [%(name)s] - %(levelname)s - %(message)s')
+    
+    # File handler
+    if not any(isinstance(h, logging.FileHandler) and h.baseFilename.endswith(f"{service_name}.log") for h in root_logger.handlers):
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
+    
+    # Console handler
+    if not any(isinstance(h, logging.StreamHandler) and h.stream == sys.stdout for h in root_logger.handlers):
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(formatter)
+        root_logger.addHandler(console_handler)
 
 logger = logging.getLogger("file_sniffer")
 

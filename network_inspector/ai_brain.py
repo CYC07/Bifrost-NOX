@@ -3,15 +3,17 @@ import os
 import sys
 import logging
 import requests
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from common.utils import setup_logging
 
 # Setup Logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - [BRAIN] - %(message)s')
+setup_logging("ai_brain")
 logger = logging.getLogger("ai_brain")
 
 ZMQ_ENDPOINT = "ipc:///tmp/firewall_pipeline"
 MASTER_AI_URL = "http://localhost:8000/analyze_traffic"
 
-def check_traffic_with_master(ip_src, payload):
+def check_traffic_with_master(ip_src, ip_dst, dst_port, payload):
     """
     Sends data to the Master AI service.
     """
@@ -25,12 +27,13 @@ def check_traffic_with_master(ip_src, payload):
         try:
             text_content = payload.decode('utf-8')
         except:
-            content_type = "document" 
-            
+            content_type = "document"
+
         data = {
             "content_type": content_type,
             "source_ip": ip_src,
-            "destination_ip": "unknown",
+            "destination_ip": ip_dst,
+            "port": dst_port,
         }
         
         if content_type == "text":
@@ -65,13 +68,18 @@ def start_server():
             payload = socket.recv()
             
             parts = header.split(' ')
-            if len(parts) < 3 or parts[0] != "check":
+            # New format: "check <src_ip> <dst_ip> <sport> <dport> <payload_len>"
+            if parts[0] != "check" or len(parts) < 2:
                 socket.send_string("ALLOW")
                 continue
-                
+
             ip_src = parts[1]
-            
-            is_allowed = check_traffic_with_master(ip_src, payload)
+            ip_dst = parts[2] if len(parts) > 2 else "unknown"
+            dst_port = parts[4] if len(parts) > 4 else ""
+
+            logger.info(f"Inspect: {ip_src} -> {ip_dst}:{dst_port} ({len(payload)} bytes)")
+
+            is_allowed = check_traffic_with_master(ip_src, ip_dst, dst_port, payload)
             
             # Respond
             socket.send_string("ALLOW" if is_allowed else "BLOCK")

@@ -20,9 +20,10 @@ import json
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from common.schemas import VerdictStatus, AggregatedVerdict, RiskLevel, AnalysisResult
+from common.utils import setup_logging
 
+setup_logging("image_service")
 logger = logging.getLogger("image_service")
-logging.basicConfig(level=logging.INFO)
 
 # --- MODELS CONFIG ---
 TESSDATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'tesseract-5.5.2', 'tessdata'))
@@ -35,32 +36,97 @@ clip_processor = None
 yolo_model = None
 
 SEMANTIC_LABELS = [
-    "proprietary source code screenshot with api keys", 
-    "internal financial spreadsheet with sensitive data", 
-    "server network diagram with ip addresses", 
-    "official id card passport document", 
+    # --- Sensitive content (original) ---
+    "proprietary source code screenshot with api keys",
+    "internal financial spreadsheet with sensitive data",
+    "server network diagram with ip addresses",
+    "official id card passport document",
     "pakistani cnic national identity card",
     "smart identity card with chip",
     "nsfw nude explicit sexual content",
     "pornography and adult content",
     "bikini lingerie or semi-nude person",
-    "standard photo of nature or animals", 
     "architectural blueprint of secure facility",
-    "public website screenshot",
-    "generic bar chart or graph"
+
+    # --- Generic logo / branding detection ---
+    "corporate logo or brand watermark on an image",
+    "company logo prominently displayed on a document",
+    "brand logo on product packaging or advertisement",
+    "generic business trademark or registered brand mark",
+    "sports team or athletic brand logo",
+    "luxury fashion brand logo",
+
+    # --- Phishing / brand impersonation login pages ---
+    "microsoft office 365 or outlook login page with logo",
+    "google or gmail account sign in page with logo",
+    "apple id icloud sign in page with logo",
+    "paypal payment or login page with logo",
+    "amazon account sign in page with logo",
+    "facebook or meta login page with logo",
+    "instagram login page with logo",
+    "linkedin login page with logo",
+    "netflix or streaming service login with logo",
+    "dropbox or cloud storage login page with logo",
+    "whatsapp or telegram login page with logo",
+
+    # --- Banking / financial logos ---
+    "bank login page with financial institution logo",
+    "visa mastercard or credit card company logo",
+    "major bank logo like hsbc chase citi bank of america",
+    "cryptocurrency exchange logo like binance coinbase kraken",
+    "digital wallet or payment app logo",
+
+    # --- Government / official emblems ---
+    "government official seal or national emblem",
+    "police law enforcement or military badge logo",
+    "tax authority or revenue department logo",
+
+    # --- Corporate / DLP relevant ---
+    "internal corporate document with company logo header",
+    "employee id badge with company logo",
+    "corporate presentation slide with company branding",
+    "confidential report watermarked with company logo",
+
+    # --- Benign / baseline ---
+    "standard photo of nature or animals",
+    "public website screenshot without branding",
+    "generic bar chart or graph",
+    "plain photograph with no logos or branding",
 ]
 
 SENSITIVE_LABELS = [
-    "proprietary source code screenshot with api keys", 
-    "internal financial spreadsheet with sensitive data", 
-    "server network diagram with ip addresses", 
-    "official id card passport document", 
+    # Original sensitive content
+    "proprietary source code screenshot with api keys",
+    "internal financial spreadsheet with sensitive data",
+    "server network diagram with ip addresses",
+    "official id card passport document",
     "pakistani cnic national identity card",
     "smart identity card with chip",
     "nsfw nude explicit sexual content",
     "pornography and adult content",
     "bikini lingerie or semi-nude person",
     "architectural blueprint of secure facility",
+
+    # Phishing / brand impersonation (high risk)
+    "microsoft office 365 or outlook login page with logo",
+    "google or gmail account sign in page with logo",
+    "apple id icloud sign in page with logo",
+    "paypal payment or login page with logo",
+    "amazon account sign in page with logo",
+    "facebook or meta login page with logo",
+    "instagram login page with logo",
+    "linkedin login page with logo",
+    "netflix or streaming service login with logo",
+    "dropbox or cloud storage login page with logo",
+    "whatsapp or telegram login page with logo",
+    "bank login page with financial institution logo",
+    "cryptocurrency exchange logo like binance coinbase kraken",
+
+    # Corporate DLP
+    "internal corporate document with company logo header",
+    "employee id badge with company logo",
+    "corporate presentation slide with company branding",
+    "confidential report watermarked with company logo",
 ]
 
 async def load_models():

@@ -60,14 +60,18 @@ void init_zmq() {
 
 bool ask_python_brain(const FlowKey& key, const unsigned char* payload, int payload_len) {
     try {
-        char ip_str[INET_ADDRSTRLEN];
-        struct in_addr ip_addr;
-        ip_addr.s_addr = key.saddr;
-        inet_ntop(AF_INET, &ip_addr, ip_str, INET_ADDRSTRLEN);
+        char src_ip[INET_ADDRSTRLEN];
+        char dst_ip[INET_ADDRSTRLEN];
+        struct in_addr src_addr, dst_addr;
+        src_addr.s_addr = key.saddr;
+        dst_addr.s_addr = key.daddr;
+        inet_ntop(AF_INET, &src_addr, src_ip, INET_ADDRSTRLEN);
+        inet_ntop(AF_INET, &dst_addr, dst_ip, INET_ADDRSTRLEN);
 
-        // Prepare Header
+        // Prepare Header: "check <src_ip> <dst_ip> <sport> <dport> <payload_len>"
         std::stringstream ss;
-        ss << "check " << ip_str << " " << payload_len;
+        ss << "check " << src_ip << " " << dst_ip << " "
+           << key.sport << " " << key.dport << " " << payload_len;
         std::string header = ss.str();
 
         // Send Header and Payload as a Multi-part Message

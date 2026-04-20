@@ -1,1 +1,0 @@
-tail -n 10 /home/cyc0logy/FYP/ai_firewall/gateway.log

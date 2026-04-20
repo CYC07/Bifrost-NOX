@@ -13,9 +13,10 @@ from sentence_transformers import SentenceTransformer, util
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from common.schemas import VerdictStatus, AggregatedVerdict, RiskLevel, AnalysisResult
+from common.utils import setup_logging
 
+setup_logging("text_service")
 logger = logging.getLogger("text_service")
-logging.basicConfig(level=logging.INFO)
 
 # --- GLOBAL MODELS ---
 semantic_model = None
