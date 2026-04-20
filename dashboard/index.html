@@ -1,205 +1,26 @@
-<!DOCTYPE html>
-<html lang="en">
+<!doctype html>
+<html lang="en" data-theme="light" data-layout="sidebar" data-density="normal">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Firewall Dashboard</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <style>
-        body { background-color: #f8f9fa; }
-        .card { margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); border: none; }
-        .log-entry { font-family: monospace; font-size: 0.9em; border-bottom: 1px solid #eee; padding: 5px; }
-        .log-block { color: #dc3545; background-color: #ffe6e6; }
-        .log-allow { color: #198754; }
-        #log-container { height: 400px; overflow-y: auto; background: white; border: 1px solid #ddd; padding: 10px; border-radius: 5px;}
-    </style>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>AI Firewall — Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css"/>
 </head>
 <body>
-    <nav class="navbar navbar-dark bg-dark">
-        <div class="container-fluid">
-            <span class="navbar-brand mb-0 h1">🛡️ AI Firewall Monitor</span>
-            <span class="navbar-text text-light" id="connection-status">Connecting...</span>
-        </div>
-    </nav>
+<div id="root"></div>
 
-    <div class="container mt-4">
-        <!-- Stats Row -->
-        <div class="row">
-            <div class="col-md-3">
-                <div class="card text-white bg-primary">
-                    <div class="card-body">
-                        <h5 class="card-title">Total Requests</h5>
-                        <h2 class="card-text" id="stat-total">0</h2>
-                    </div>
-                </div>
-            </div>
-            <div class="col-md-3">
-                <div class="card text-white bg-success">
-                    <div class="card-body">
-                        <h5 class="card-title">Allowed</h5>
-                        <h2 class="card-text" id="stat-allowed">0</h2>
-                    </div>
-                </div>
-            </div>
-            <div class="col-md-3">
-                <div class="card text-white bg-danger">
-                    <div class="card-body">
-                        <h5 class="card-title">Blocked</h5>
-                        <h2 class="card-text" id="stat-blocked">0</h2>
-                    </div>
-                </div>
-            </div>
-            <div class="col-md-3">
-                <div class="card text-white bg-warning">
-                    <div class="card-body">
-                        <h5 class="card-title">Threats Detected</h5>
-                        <h2 class="card-text" id="stat-threats">0</h2>
-                    </div>
-                </div>
-            </div>
-        </div>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
 
-        <!-- Charts & Controls Row -->
-        <div class="row">
-            <div class="col-md-8">
-                <div class="card">
-                    <div class="card-header">Traffic Live Feed</div>
-                    <div class="card-body">
-                        <div id="log-container">Loading logs...</div>
-                    </div>
-                </div>
-            </div>
-            <div class="col-md-4">
-                <!-- Manual Upload Card -->
-                <div class="card mb-3">
-                    <div class="card-header">Manual Analysis Test</div>
-                    <div class="card-body">
-                        <form id="upload-form">
-                            <div class="mb-3">
-                                <label class="form-label">Select File (Image/Doc)</label>
-                                <input type="file" class="form-control" id="test-file" required>
-                            </div>
-                            <div class="mb-3">
-                                <label class="form-label">Type</label>
-                                <select class="form-select" id="test-type">
-                                    <option value="image">Image</option>
-                                    <option value="document">Document</option>
-                                </select>
-                            </div>
-                            <button type="submit" class="btn btn-primary w-100">Upload & Analyze</button>
-                        </form>
-                    </div>
-                </div>
-
-                <!-- Test Controls Card -->
-                <div class="card">
-                    <div class="card-header">Test Controls</div>
-                    <div class="card-body">
-                        <div class="d-grid gap-2">
-                            <button class="btn btn-outline-success" onclick="sendTest('safe')">Send Safe Traffic</button>
-                            <button class="btn btn-outline-danger" onclick="sendTest('malware')">Send Malware Test</button>
-                            <button class="btn btn-outline-warning" onclick="sendTest('sql')">Send SQL Injection</button>
-                        </div>
-                        <hr>
-                        <h6>Traffic Volume</h6>
-                        <canvas id="trafficChart" height="200"></canvas>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <script>
-        const API_URL = "http://localhost:8000";
-        let chartInstance = null;
-
-        function initChart() {
-            const ctx = document.getElementById('trafficChart').getContext('2d');
-            chartInstance = new Chart(ctx, {
-                type: 'doughnut',
-                data: {
-                    labels: ['Allowed', 'Blocked'],
-                    datasets: [{
-                        data: [0, 0],
-                        backgroundColor: ['#198754', '#dc3545']
-                    }]
-                },
-                options: { responsive: true, maintainAspectRatio: false }
-            });
-        }
-
-        async function fetchStats() {
-            try {
-                const response = await fetch(`${API_URL}/stats`);
-                const data = await response.json();
-                
-                document.getElementById('stat-total').innerText = data.total;
-                document.getElementById('stat-allowed').innerText = data.allowed;
-                document.getElementById('stat-blocked').innerText = data.blocked;
-                document.getElementById('stat-threats').innerText = data.threats;
-                document.getElementById('connection-status').innerText = "🟢 Online";
-
-                // Update Chart
-                if (chartInstance) {
-                    chartInstance.data.datasets[0].data = [data.allowed, data.blocked];
-                    chartInstance.update();
-                }
-
-                // Update Logs
-                const logContainer = document.getElementById('log-container');
-                logContainer.innerHTML = '';
-                data.recent_logs.forEach(log => {
-                    const div = document.createElement('div');
-                    div.className = `log-entry ${log.status === 'block' ? 'log-block' : 'log-allow'}`;
-                    div.innerHTML = `<strong>[${log.timestamp}]</strong> ${log.source} &rarr; ${log.destination} | <strong>${log.status.toUpperCase()}</strong>: ${log.reason}`;
-                    logContainer.appendChild(div);
-                });
-
-            } catch (error) {
-                document.getElementById('connection-status').innerText = "🔴 Offline";
-                console.error("Fetch error:", error);
-            }
-        }
-
-        async function sendTest(type) {
-            try {
-                await fetch(`${API_URL}/test_attack?type=${type}`, { method: 'POST' });
-                fetchStats(); // Refresh immediately
-            } catch (e) {
-                alert("Failed to send test");
-            }
-        }
-
-        document.getElementById('upload-form').onsubmit = async (e) => {
-            e.preventDefault();
-            const fileInput = document.getElementById('test-file');
-            const typeInput = document.getElementById('test-type');
-            
-            const formData = new FormData();
-            formData.append('file', fileInput.files[0]);
-            formData.append('content_type', typeInput.value);
-            formData.append('source_ip', '127.0.0.1');
-            formData.append('destination_ip', 'dashboard-test');
-
-            try {
-                const resp = await fetch(`${API_URL}/analyze_traffic`, {
-                    method: 'POST',
-                    body: formData
-                });
-                const result = await resp.json();
-                alert(`Analysis Complete: ${result.status.toUpperCase()}\nReason: ${result.reason}`);
-                fetchStats();
-            } catch (err) {
-                alert("Upload failed: " + err);
-            }
-        };
-
-        window.onload = () => {
-            initChart();
-            setInterval(fetchStats, 2000); // Poll every 2s
-            fetchStats();
-        };
-    </script>
+<script src="data.js"></script>
+<script type="text/babel" src="components.jsx"></script>
+<script type="text/babel" src="page_overview.jsx"></script>
+<script type="text/babel" src="page_core.jsx"></script>
+<script type="text/babel" src="page_uploads.jsx"></script>
+<script type="text/babel" src="app.jsx"></script>
 </body>
 </html>
