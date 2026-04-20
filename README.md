@@ -27,13 +27,13 @@ Device (phone/laptop)
         │                                        │
         ▼                                        ▼
   MITM Gateway (:8080)              Master AI Orchestrator (:8000)
-  TLS interception                  ┌─────────────────────────┐
+  TLS interception                  ┌──────────────────────────┐
   SNI extraction                    │  Image Service  (:8001)  │
   Allowlist bypass                  │  Document Service(:8002) │
                                     │  Text Service   (:8003)  │
-                                    └─────────────────────────┘
-                                              │
-                                              ▼
+                                    └──────────────────────────┘
+                                                  │
+                                                  ▼
                                     Dashboard (localhost:8000)
 ```
 
@@ -68,10 +68,11 @@ Device (phone/laptop)
 ## Installation
 
 ```bash
+# Clone the repo
 git clone https://github.com/CYC07/Bifrost-NOX.git
 cd Bifrost-NOX
 
-# 1. System dependencies (Debian / Kali / Ubuntu)
+# System dependencies (Debian / Kali / Ubuntu)
 sudo apt update && sudo apt install -y \
     tesseract-ocr \
     libnetfilter-queue-dev \
@@ -81,7 +82,15 @@ sudo apt update && sudo apt install -y \
     python3-dev \
     python3-venv
 
-# 2. Generate the local CA certificate (required for HTTPS interception)
+# Python environment                                                                                                                                                          
+python3 -m venv venv                                                                                                                                                             
+source venv/bin/activate                                                                                                                                                         
+pip install -r requirements.txt                                                                                                                                                  
+                                                                                                                                                                                 
+# Build C++ engine                                                                                                                                                            
+cd network_inspector/cpp && make && cd ../..                                                                                                                                     
+
+# Generate the local CA certificate (required for HTTPS interception)                                                                                                         
 cd gateway && python3 cert_utils.py && cd ..
 ```
 
