@@ -1,0 +1,11 @@
+{
+  "hosts": [
+    "*.whatsapp.net",
+    "*.whatsapp.com",
+    "*.snapchat.com",
+    "*.sc-cdn.net",
+    "*.fortinet.net",
+    "*.google.com",
+    "*.wicar.org"
+  ]
+}
