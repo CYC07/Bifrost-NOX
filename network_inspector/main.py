@@ -11,9 +11,10 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from gateway.auth_manager import AuthManager
+from common.utils import setup_logging
 
 # Setup Logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - [NET] - %(message)s')
+setup_logging("network_inspector")
 logger = logging.getLogger("network_inspector")
 
 # AI Config

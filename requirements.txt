@@ -21,6 +21,11 @@ numpy
 # Document Analysis
 pdfminer.six
 yara-python
+PyMuPDF
+scikit-learn
+pyexiftool
+python-docx
+openpyxl
 
 # Text Analysis & NLP
 spacy
