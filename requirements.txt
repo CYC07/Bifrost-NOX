@@ -1,9 +1,10 @@
 starlette
+uvicorn
 cryptography
-
 
 python-multipart
 pyzmq
+httpx
 
 # Network Layer
 scapy
@@ -19,7 +20,6 @@ Pillow
 numpy
 
 # Document Analysis
-pdfminer.six
 yara-python
 PyMuPDF
 scikit-learn
