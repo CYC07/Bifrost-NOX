@@ -17,6 +17,7 @@ from ultralytics import YOLO
 import asyncio
 import dataclasses
 import json
+from contextlib import asynccontextmanager
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from common.schemas import VerdictStatus, AggregatedVerdict, RiskLevel, AnalysisResult
@@ -302,7 +303,12 @@ routes = [
     Route("/analyze", analyze_image, methods=["POST"]),
 ]
 
-app = Starlette(debug=True, routes=routes, on_startup=[load_models])
+@asynccontextmanager
+async def lifespan(app):
+    await load_models()
+    yield
+
+app = Starlette(debug=True, routes=routes, lifespan=lifespan)
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8001)
