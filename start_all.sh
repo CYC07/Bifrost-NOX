@@ -10,7 +10,7 @@ set -u
 cd "$(dirname "$0")"
 
 # shellcheck source=/dev/null
-source /home/cyc0logy/FYP/ai_firewall/venv/bin/activate
+source venv/bin/activate
 
 # Load .env if present (e.g. VIRUSTOTAL_API_KEY)
 if [ -f .env ]; then
