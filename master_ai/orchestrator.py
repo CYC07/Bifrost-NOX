@@ -6,11 +6,13 @@ import datetime
 import json
 import logging
 import os
-import random
 import sys
 import threading
+import time
 from collections import Counter, deque
 from typing import Any
+
+import psutil
 
 import httpx
 import uvicorn
@@ -43,6 +45,17 @@ STATS: dict[str, int] = {"total": 0, "allowed": 0, "blocked": 0, "threats": 0}
 RECENT_LOGS: deque[dict[str, Any]] = deque(maxlen=1000)
 RECENT_THREATS: deque[dict[str, Any]] = deque(maxlen=1000)
 UPLOAD_QUEUE: deque[dict[str, Any]] = deque(maxlen=100)
+
+_START_TIME = time.time()
+_RECENT_LATENCIES: deque[float] = deque(maxlen=100)
+
+
+def _p95_latency() -> float:
+    if not _RECENT_LATENCIES:
+        return 0.0
+    sorted_lats = sorted(_RECENT_LATENCIES)
+    idx = max(0, int(len(sorted_lats) * 0.95) - 1)
+    return sorted_lats[idx]
 
 # Rolling 48-point time-series
 SERIES_LEN = 48
@@ -205,6 +218,7 @@ async def analyze_traffic(request: Request) -> JSONResponse:
     upload_record: dict[str, Any] | None = None
 
     try:
+        t0 = time.monotonic()
         async with httpx.AsyncClient() as client:
             if content_type == ContentType.TEXT:
                 resp = await client.post(
@@ -232,6 +246,7 @@ async def analyze_traffic(request: Request) -> JSONResponse:
                 if resp.status_code == 200:
                     verdict = AggregatedVerdict(**resp.json())
 
+        _RECENT_LATENCIES.append(round((time.monotonic() - t0) * 1000, 1))
     except Exception as exc:
         logger.error(f"Analysis failed: {exc}")
 
@@ -444,13 +459,47 @@ async def get_countries(request: Request) -> JSONResponse:
     return JSONResponse({"countries": result})
 
 
+def _system_metrics() -> tuple[int, int]:
+    """Return (cpu_pct, mem_pct) from psutil. Falls back to 0 on error."""
+    try:
+        cpu = int(psutil.cpu_percent(interval=None))
+        mem = int(psutil.virtual_memory().percent)
+        return cpu, mem
+    except Exception:
+        return 0, 0
+
+
+def _uptime_str() -> str:
+    elapsed = int(time.time() - _START_TIME)
+    if elapsed < 60:
+        return f"{elapsed}s"
+    if elapsed < 3600:
+        return f"{elapsed // 60}m"
+    return f"{elapsed // 3600}h {(elapsed % 3600) // 60}m"
+
+
+def _mitm_running() -> bool:
+    for proc in psutil.process_iter(["cmdline"]):
+        try:
+            cmd = " ".join(proc.info["cmdline"] or [])
+            if "gateway/proxy.py" in cmd or "proxy.py" in cmd:
+                return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    return False
+
+
 async def get_devices(request: Request) -> JSONResponse:
     targets = [
-        ("master-ai", "Master Orchestrator", f"http://localhost:8000/stats"),
+        ("master-ai", "Master Orchestrator", "http://localhost:8000/stats"),
         ("image-service", "Image AI (CLIP/YOLO/OCR)", f"{IMAGE_SERVICE_URL}/"),
         ("document-service", "Document AI (YARA/meta)", f"{DOCUMENT_SERVICE_URL}/"),
         ("text-service", "Text AI (Presidio/NLP)", f"{TEXT_SERVICE_URL}/"),
     ]
+    cpu_pct, mem_pct = _system_metrics()
+    uptime = _uptime_str()
+    total_events = STATS["total"]
+
     devices: list[dict[str, Any]] = []
     async with httpx.AsyncClient(timeout=1.5) as client:
         for name, role, url in targets:
@@ -461,30 +510,30 @@ async def get_devices(request: Request) -> JSONResponse:
                     status = "degraded"
             except Exception:
                 status = "offline"
-            cpu = random.randint(15, 70) if status == "healthy" else random.randint(70, 95)
-            mem = random.randint(20, 70) if status == "healthy" else random.randint(60, 90)
             devices.append(
                 {
                     "name": name,
                     "role": role,
                     "zone": "local",
                     "status": status,
-                    "cpu": cpu,
-                    "mem": mem,
-                    "tput": "—" if status == "offline" else f"{random.randint(1, 50)}.{random.randint(0, 9)} Mbps",
-                    "uptime": "—" if status == "offline" else f"{random.randint(1, 48)}h",
+                    "cpu": cpu_pct if status != "offline" else 0,
+                    "mem": mem_pct if status != "offline" else 0,
+                    "tput": f"{total_events} ev" if status != "offline" else "—",
+                    "uptime": uptime if status != "offline" else "—",
                 }
             )
+
+    mitm_status = "healthy" if _mitm_running() else "offline"
     devices.append(
         {
             "name": "mitm-gateway",
             "role": "MITM TLS Proxy",
             "zone": "local",
-            "status": "healthy",
-            "cpu": random.randint(10, 50),
-            "mem": random.randint(20, 60),
-            "tput": f"{random.randint(1, 20)}.{random.randint(0, 9)} Mbps",
-            "uptime": "live",
+            "status": mitm_status,
+            "cpu": cpu_pct if mitm_status != "offline" else 0,
+            "mem": mem_pct if mitm_status != "offline" else 0,
+            "tput": f"{total_events} ev" if mitm_status != "offline" else "—",
+            "uptime": uptime if mitm_status != "offline" else "—",
         }
     )
     return JSONResponse({"devices": devices})
@@ -517,7 +566,7 @@ async def get_overview(request: Request) -> JSONResponse:
                 "throughput": round(max(0.1, total / 60), 2),
                 "blocked_24h": blocked,
                 "active_sessions": STATS["allowed"],
-                "p95_latency": round(8 + random.random() * 6, 1),
+                "p95_latency": _p95_latency(),
             },
             "series": {k: list(v) for k, v in TIME_SERIES.items()},
             "recent_logs": list(RECENT_LOGS)[:1000],
@@ -539,7 +588,7 @@ async def _sampler() -> None:
             TIME_SERIES["throughput"].append(float(delta_total))
             TIME_SERIES["blocked"].append(float(delta_blocked))
             TIME_SERIES["sessions"].append(float(STATS["allowed"]))
-            TIME_SERIES["latency"].append(round(8.0 + random.random() * 8.0, 1))
+            TIME_SERIES["latency"].append(_p95_latency())
         except Exception as exc:
             logger.error(f"sampler error: {exc}")
         await asyncio.sleep(3)
