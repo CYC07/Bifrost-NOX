@@ -42,11 +42,13 @@ Device (phone/laptop)
 ## Features
 
 - **Transparent HTTPS interception** — MITM proxy with per-domain certificate generation; no client configuration needed when deployed as a hotspot gateway
-- **AI content analysis** — CLIP + YOLOv8 for image NSFW/object detection; YARA + metadata heuristics for documents; Presidio + sentence-transformers for PII, API key leaks, and SQL injection in text
+- **AI content analysis** — CLIP + YOLOv8 for image NSFW/object detection; YARA + VirusTotal hash lookup + structural anomaly detection (Isolation Forest) + metadata forensics for documents; Presidio + sentence-transformers for PII, API key leaks, and SQL injection in text
 - **Static rule engine** — IP/port/domain/keyword rules evaluated before AI inference; configurable via the dashboard
 - **Allowlist for cert-pinned apps** — WhatsApp, Snapchat, Signal, Telegram, and any other app that pins its TLS certificate can be allowlisted to tunnel through uninspected; all others are blocked by default if MITM fails
 - **Real-time dashboard** — live KPI cards, threat feed, traffic charts, rule management, and AI file intake at `http://localhost:8000`
 - **C++ packet engine** — NFQUEUE handler with 10-second flow cache; fail-open by default so network access is never fully blocked
+- **VirusTotal integration** — SHA-256 hash lookup on every scanned document; optional (set `VIRUSTOTAL_API_KEY` in `.env`); fails open so the service works without a key
+- **Host-only proxy binding** — MITM proxy auto-detects the hotspot interface IP and binds exclusively to it, ensuring the firewall host's own traffic is never intercepted
 
 ---
 
@@ -174,6 +176,27 @@ Preset buttons for WhatsApp, Snapchat, Signal, Telegram, and iMessage are availa
 
 ---
 
+## VirusTotal Integration
+
+The document service computes a SHA-256 hash of every scanned file and queries the VirusTotal API. No file bytes are ever uploaded — hash-only lookups preserve privacy and keep latency low (~200–500 ms on a cache hit).
+
+| Scenario | Score | Verdict |
+|---|---|---|
+| VT reports ≥ 1 malicious engine | 0.99 | BLOCK |
+| VT reports 0 detections | 0.0 | pass to YARA |
+| File not in VT database (404) | 0.0 | pass to YARA |
+| API unavailable / no key set | 0.0 | pass to YARA |
+
+To enable, add your key to `.env` in the project root (already gitignored):
+
+```bash
+echo "VIRUSTOTAL_API_KEY=your_key_here" > .env
+```
+
+`./start_all.sh` picks it up automatically. Without a key the service runs with YARA-only detection.
+
+---
+
 ## Network Topology (hotspot mode)
 
 | Item | Value |
@@ -193,7 +216,7 @@ ai_firewall/
 ├── common/               # Shared schemas, utilities, allowlist module
 ├── config/               # Persisted rules and allowlist (JSON)
 ├── dashboard/            # React 18 + Babel frontend (served by orchestrator)
-├── document_service/     # YARA, metadata, structure analysis
+├── document_service/     # YARA + VirusTotal, metadata forensics, structural anomaly, content keywords
 ├── gateway/              # MITM proxy, TLS engine, certificate authority
 ├── image_service/        # CLIP, YOLOv8, Tesseract OCR
 ├── master_ai/            # Orchestrator, rule engine
@@ -209,7 +232,7 @@ ai_firewall/
 
 ## Tech Stack
 
-**AI / ML:** PyTorch · CLIP · YOLOv8 (ultralytics) · Tesseract OCR · sentence-transformers · Presidio · YARA · scikit-learn
+**AI / ML:** PyTorch · CLIP · YOLOv8 (ultralytics) · Tesseract OCR · sentence-transformers · Presidio · YARA · VirusTotal API · scikit-learn (Isolation Forest)
 
 **Backend:** Python 3.11 · Starlette · uvicorn · httpx · ZeroMQ · cryptography
 
