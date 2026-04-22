@@ -108,7 +108,7 @@ async def analyze_document(request: Request) -> JSONResponse:
     r_struct, r_content, r_malware, r_meta = await asyncio.gather(
         asyncio.to_thread(structure_model.analyze, contents),
         asyncio.to_thread(content_model.analyze, contents),
-        asyncio.to_thread(malware_model.analyze, contents),
+        malware_model.analyze(contents),
         asyncio.to_thread(metadata_model.analyze, contents),
     )
 
