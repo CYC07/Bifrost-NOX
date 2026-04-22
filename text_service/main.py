@@ -8,6 +8,7 @@ import os
 import logging
 import re
 import dataclasses
+from contextlib import asynccontextmanager
 from presidio_analyzer import AnalyzerEngine
 from sentence_transformers import SentenceTransformer, util
 
@@ -154,7 +155,12 @@ routes = [
     Route("/analyze", analyze_text, methods=["POST"]),
 ]
 
-app = Starlette(debug=True, routes=routes, on_startup=[load_models])
+@asynccontextmanager
+async def lifespan(app):
+    await load_models()
+    yield
+
+app = Starlette(debug=True, routes=routes, lifespan=lifespan)
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8003)
