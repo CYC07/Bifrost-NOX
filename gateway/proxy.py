@@ -1,4 +1,7 @@
+import fcntl
 import logging
+import socket
+import struct
 import sys
 import os
 import asyncio
@@ -120,9 +123,30 @@ class IDPInspector:
             logger.error(f"AI Error: {e}")
         return {"status": "allow"}
 
+def _iface_ip(iface: str) -> str:
+    """Return the IPv4 address of *iface*, or '' on any error."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        return socket.inet_ntoa(
+            fcntl.ioctl(s.fileno(), 0x8915,  # SIOCGIFADDR
+                        struct.pack("256s", iface[:15].encode()))[20:24]
+        )
+    except Exception:
+        return ""
+
+
 if __name__ == "__main__":
+    # Bind only to the hotspot interface so the laptop's own traffic never
+    # reaches the proxy.  Falls back to 0.0.0.0 if the interface is absent.
+    hotspot_if = os.environ.get("HOTSPOT_IF", "wlan1")
+    bind_ip = os.environ.get("PROXY_BIND_IP") or _iface_ip(hotspot_if) or "0.0.0.0"
+    if bind_ip != "0.0.0.0":
+        logger.info("Proxy binding to %s (%s) — local traffic excluded", bind_ip, hotspot_if)
+    else:
+        logger.warning("Could not resolve %s IP — binding to 0.0.0.0", hotspot_if)
+
     inspector = IDPInspector()
-    proxy = TransparentProxy(inspector=inspector)
+    proxy = TransparentProxy(host=bind_ip, inspector=inspector)
     loop = asyncio.get_event_loop()
     try:
         loop.run_until_complete(proxy.start())
