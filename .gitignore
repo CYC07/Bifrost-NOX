@@ -20,3 +20,7 @@ graphify-out/
 *.swp
 *.swo
 "Model installation/"
+Model_installation/
+*.pt
+*.onnx
+*.bin
