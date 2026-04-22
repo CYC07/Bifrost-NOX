@@ -12,6 +12,14 @@ cd "$(dirname "$0")"
 # shellcheck source=/dev/null
 source /home/cyc0logy/FYP/ai_firewall/venv/bin/activate
 
+# Load .env if present (e.g. VIRUSTOTAL_API_KEY)
+if [ -f .env ]; then
+    set -a
+    # shellcheck source=/dev/null
+    source .env
+    set +a
+fi
+
 HOTSPOT_IF="${HOTSPOT_IF:-wlan1}"
 
 echo "============================================="
@@ -41,7 +49,22 @@ sudo -v || { echo "sudo required"; exit 1; }
 
 # --- 1. AI microservices ---
 echo "[1/4] Starting AI microservices (orchestrator + image/text/document)..."
-./start_services.sh
+
+_start_svc() {
+    local name="$1" module="$2" port="$3" log="$4"
+    if pgrep -f "$module" >/dev/null; then
+        echo "  $name already running — skipping"
+    else
+        nohup python3 -m uvicorn "$module" --host 0.0.0.0 --port "$port" > "$log" 2>&1 &
+        echo "  $name PID: $! (log: $log)"
+    fi
+}
+
+_start_svc "Orchestrator  " "master_ai.orchestrator:app"   8000 portal.log
+_start_svc "Image service " "image_service.main:app"       8001 image.log
+_start_svc "Document svc  " "document_service.main:app"    8002 document.log
+_start_svc "Text service  " "text_service.main:app"        8003 text.log
+sleep 2
 
 # --- 2. Gateway MITM proxy ---
 echo "[2/4] Starting Gateway Proxy (:8080)..."
