@@ -13,6 +13,7 @@ import dataclasses
 import logging
 import os
 import sys
+from contextlib import asynccontextmanager
 from typing import List
 
 import uvicorn
@@ -120,7 +121,12 @@ routes = [
     Route("/analyze", analyze_document, methods=["POST"]),
 ]
 
-app = Starlette(debug=True, routes=routes, on_startup=[load_models])
+@asynccontextmanager
+async def lifespan(app):
+    await load_models()
+    yield
+
+app = Starlette(debug=True, routes=routes, lifespan=lifespan)
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8002)
