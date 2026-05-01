@@ -207,6 +207,10 @@ class TransparentProxy:
             server_ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
             server_ctx.check_hostname = False
             server_ctx.verify_mode = ssl.CERT_NONE
+            # ALPN required by Cloudflare, AWS, Google and most modern CDNs —
+            # without it they RST during handshake. Advertise http/1.1 only;
+            # advertising h2 would require HTTP/2 framing support in the pipe.
+            server_ctx.set_alpn_protocols(["http/1.1"])
             server_reader, server_writer = await asyncio.open_connection(dest_ip, dest_port, ssl=server_ctx, server_hostname=server_name)
         except Exception as exc:
             logger.warning(f"Upstream TLS to {server_name} failed: {exc}")
@@ -218,6 +222,7 @@ class TransparentProxy:
             cert_path, key_path = self.ca.get_certificate_for_host(server_name)
             ssl_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
             ssl_ctx.load_cert_chain(cert_path, key_path)
+            ssl_ctx.set_alpn_protocols(["http/1.1"])
 
             transport = client_writer.transport
             new_transport = await self.loop.start_tls(transport, transport.get_protocol(), ssl_ctx, server_side=True)

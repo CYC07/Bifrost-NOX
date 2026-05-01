@@ -29,13 +29,28 @@ echo "============================================="
 # --- Preflight ---
 echo "[0/4] Preflight checks..."
 
-if ! iw dev "$HOTSPOT_IF" info 2>/dev/null | grep -q "type AP"; then
-    echo "  WARN: $HOTSPOT_IF is not in AP mode. Start the hotspot first:"
+_ap_iface=""
+for _iface in "$HOTSPOT_IF" wlan0 wlan1; do
+    if iw dev "$_iface" info 2>/dev/null | grep -q "type AP"; then
+        _ap_iface="$_iface"
+        break
+    fi
+done
+
+if [ -z "$_ap_iface" ]; then
+    echo "  WARN: neither wlan0 nor wlan1 is in AP mode. Start the hotspot first:"
     echo "        sudo /home/cyc0logy/wifi-hotspot.sh"
     read -r -p "  Continue anyway? [y/N] " ans
     case "$ans" in y|Y|yes) ;; *) exit 1;; esac
 else
-    echo "  OK: hotspot is up on $HOTSPOT_IF"
+    HOTSPOT_IF="$_ap_iface"
+    # Derive internet uplink as the other wlan interface.
+    if [ "$HOTSPOT_IF" = "wlan0" ]; then
+        INTERNET_IF="${INTERNET_IF:-wlan1}"
+    else
+        INTERNET_IF="${INTERNET_IF:-wlan0}"
+    fi
+    echo "  OK: hotspot is up on $HOTSPOT_IF (uplink: $INTERNET_IF)"
 fi
 
 if [ ! -x ./network_inspector/cpp/firewall_engine ]; then
@@ -71,14 +86,14 @@ echo "[2/4] Starting Gateway Proxy (:8080)..."
 if pgrep -f "gateway/proxy.py" >/dev/null; then
     echo "  already running — skipping"
 else
-    nohup python3 gateway/proxy.py > gateway.log 2>&1 &
+    nohup env HOTSPOT_IF="$HOTSPOT_IF" python3 gateway/proxy.py > gateway.log 2>&1 &
     echo "  PID: $! (log: gateway.log)"
 fi
 
 # --- 3. Network layer (iptables + ai_brain + C++ engine) ---
 # start_network.sh now backgrounds the C++ engine itself, so this returns.
 echo "[3/4] Starting Network Layer (sudo)..."
-sudo -E HOTSPOT_IF="$HOTSPOT_IF" ./start_network.sh
+sudo -E HOTSPOT_IF="$HOTSPOT_IF" INTERNET_IF="$INTERNET_IF" ./start_network.sh
 
 # --- 4. Summary ---
 sleep 1

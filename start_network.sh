@@ -14,8 +14,28 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
-HOTSPOT_IF="${HOTSPOT_IF:-wlan1}"
-INTERNET_IF="${INTERNET_IF:-wlan0}"
+# Auto-detect which wlan is in AP mode if not supplied by caller.
+_ap_iface=""
+for _iface in "${HOTSPOT_IF:-wlan1}" wlan0 wlan1; do
+    if iw dev "$_iface" info 2>/dev/null | grep -q "type AP"; then
+        _ap_iface="$_iface"
+        break
+    fi
+done
+if [ -n "$_ap_iface" ]; then
+    HOTSPOT_IF="$_ap_iface"
+else
+    HOTSPOT_IF="${HOTSPOT_IF:-wlan1}"
+fi
+
+# Derive internet uplink as the other wlan if not explicitly set.
+if [ -z "${INTERNET_IF:-}" ]; then
+    if [ "$HOTSPOT_IF" = "wlan0" ]; then
+        INTERNET_IF="wlan1"
+    else
+        INTERNET_IF="wlan0"
+    fi
+fi
 QUEUE_NUM="${QUEUE_NUM:-1}"
 
 echo "[1/3] Enabling IP forwarding..."
