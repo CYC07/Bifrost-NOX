@@ -606,8 +606,64 @@ async def dashboard_index(request: Request) -> FileResponse:
     return FileResponse("dashboard/index.html")
 
 
+# --------------------------------------------------------------------- auth
+# The control plane must not be mutable by the very clients the firewall
+# polices. Hotspot clients (e.g. 192.168.50.x) can reach :8000, so admin
+# actions require either a loopback peer (the operator on localhost) or a
+# valid FIREWALL_ADMIN_TOKEN. Read-only GETs stay open so the dashboard works
+# from any device; only state changes and internal ingest are gated.
+from starlette.middleware.base import BaseHTTPMiddleware  # noqa: E402
+
+ADMIN_TOKEN = os.getenv("FIREWALL_ADMIN_TOKEN", "").strip()
+
+# Endpoints only the proxy / ai_brain (both local) should call.
+_INTERNAL_PATHS = {"/analyze_traffic", "/log_event"}
+# Prefixes whose *mutations* (POST/PUT/PATCH/DELETE) are admin-only.
+_MUTABLE_PREFIXES = ("/rules", "/allowlist", "/test_attack")
+_MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def _is_loopback(host: str) -> bool:
+    return host in ("127.0.0.1", "::1", "localhost") or host.startswith("127.")
+
+
+def _path_protected(path: str, method: str) -> bool:
+    if path in _INTERNAL_PATHS:
+        return True
+    if method.upper() in _MUTATING_METHODS:
+        return any(path == p or path.startswith(p + "/") or path == p for p in _MUTABLE_PREFIXES)
+    return False
+
+
+def _authorize(client_host: str, path: str, method: str, token: str, admin_token: str) -> bool:
+    """Pure authorization decision. True = allow.
+
+    Testable without a live server (Starlette's TestClient reports a synthetic
+    peer, so exercise this directly with real host strings).
+    """
+    if not _path_protected(path, method):
+        return True
+    if _is_loopback(client_host):
+        return True
+    return bool(admin_token) and bool(token) and token == admin_token
+
+
+class AdminAuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        client_host = request.client.host if request.client else ""
+        token = request.headers.get("x-admin-token", "") or request.query_params.get("token", "")
+        if not _authorize(client_host, request.url.path, request.method, token, ADMIN_TOKEN):
+            logger.warning("Blocked admin action %s %s from %s", request.method, request.url.path, client_host)
+            return JSONResponse(
+                {"error": "forbidden: admin action requires a loopback client or a valid FIREWALL_ADMIN_TOKEN"},
+                status_code=403,
+            )
+        return await call_next(request)
+
+
 middleware = [
     Middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]),
+    Middleware(AdminAuthMiddleware),
 ]
 
 routes = [
@@ -634,7 +690,7 @@ routes = [
     Mount("/dashboard", StaticFiles(directory="dashboard", html=True), name="dashboard"),
 ]
 
-app = Starlette(debug=True, routes=routes, middleware=middleware, on_startup=[on_startup])
+app = Starlette(debug=False, routes=routes, middleware=middleware, on_startup=[on_startup])
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
