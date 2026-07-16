@@ -1,0 +1,50 @@
+{"text": "id=42", "label": "clean", "source": "seed"}
+{"text": "q=best pizza near me", "label": "clean", "source": "seed"}
+{"text": "search=wireless headphones under 100", "label": "clean", "source": "seed"}
+{"text": "page=2&sort=price_asc", "label": "clean", "source": "seed"}
+{"text": "username=john.doe&password=hunter2", "label": "clean", "source": "seed"}
+{"text": "email=alice@example.com", "label": "clean", "source": "seed"}
+{"text": "GET /products/1234 HTTP/1.1", "label": "clean", "source": "seed"}
+{"text": "GET /api/v1/users/me HTTP/1.1", "label": "clean", "source": "seed"}
+{"text": "category=electronics&brand=sony", "label": "clean", "source": "seed"}
+{"text": "GET /images/logo.png HTTP/1.1", "label": "clean", "source": "seed"}
+{"text": "GET /css/main.css HTTP/1.1", "label": "clean", "source": "seed"}
+{"text": "comment=Great article, thanks for sharing your thoughts!", "label": "clean", "source": "seed"}
+{"text": "message=Can you send me the quarterly report by Friday?", "label": "clean", "source": "seed"}
+{"text": "date=2026-01-15&region=us-east", "label": "clean", "source": "seed"}
+{"text": "lang=en-US&currency=USD", "label": "clean", "source": "seed"}
+{"text": "GET /blog/how-to-bake-sourdough-bread HTTP/1.1", "label": "clean", "source": "seed"}
+{"text": "filter=in_stock&color=blue&size=medium", "label": "clean", "source": "seed"}
+{"text": "q=SELECT the best plan for my team", "label": "clean", "source": "seed"}
+{"text": "note=Remember to update the passwords next month", "label": "clean", "source": "seed"}
+{"text": "address=42 Baker Street, London, NW1 6XE", "label": "clean", "source": "seed"}
+{"text": "POST /api/orders {\"item_id\": 55, \"qty\": 2, \"coupon\": \"SAVE10\"}", "label": "clean", "source": "seed"}
+{"text": "GET /docs/getting-started HTTP/1.1", "label": "clean", "source": "seed"}
+{"text": "name=O'Brien", "label": "clean", "source": "seed"}
+{"text": "bio=I love hiking, photography, and building things with my kids.", "label": "clean", "source": "seed"}
+{"text": "query=weather in san francisco tomorrow", "label": "clean", "source": "seed"}
+{"text": "path=/home/user/documents/report.pdf", "label": "clean", "source": "seed"}
+{"text": "GET /favicon.ico HTTP/1.1", "label": "clean", "source": "seed"}
+{"text": "redirect=/dashboard/settings", "label": "clean", "source": "seed"}
+{"text": "amount=1500.00&account=savings", "label": "clean", "source": "seed"}
+{"text": "GET /js/app.bundle.js HTTP/1.1", "label": "clean", "source": "seed"}
+{"text": "feedback=The checkout process was smooth and fast.", "label": "clean", "source": "seed"}
+{"text": "product=laptop stand adjustable aluminum", "label": "clean", "source": "seed"}
+{"text": "token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", "label": "clean", "source": "seed"}
+{"text": "GET /health HTTP/1.1", "label": "clean", "source": "seed"}
+{"text": "sort=created_at&order=desc&limit=20", "label": "clean", "source": "seed"}
+{"text": "city=New York&country=United States", "label": "clean", "source": "seed"}
+{"text": "subject=Meeting notes from Tuesday", "label": "clean", "source": "seed"}
+{"text": "GET /api/v2/products?page=1&per_page=25 HTTP/1.1", "label": "clean", "source": "seed"}
+{"text": "title=Understanding database indexing and query optimization", "label": "clean", "source": "seed"}
+{"text": "description=A durable backpack with a padded laptop compartment.", "label": "clean", "source": "seed"}
+{"text": "code=US&zip=90210", "label": "clean", "source": "seed"}
+{"text": "GET /about-us HTTP/1.1", "label": "clean", "source": "seed"}
+{"text": "keyword=machine learning tutorial for beginners", "label": "clean", "source": "seed"}
+{"text": "user_id=9981&session=active", "label": "clean", "source": "seed"}
+{"text": "reply=Sounds good, let's schedule it for 3pm.", "label": "clean", "source": "seed"}
+{"text": "GET /terms-of-service HTTP/1.1", "label": "clean", "source": "seed"}
+{"text": "select=all&view=grid", "label": "clean", "source": "seed"}
+{"text": "phone=+1-555-0142", "label": "clean", "source": "seed"}
+{"text": "GET /static/fonts/inter.woff2 HTTP/1.1", "label": "clean", "source": "seed"}
+{"text": "content=Please review the attached proposal and share feedback.", "label": "clean", "source": "seed"}
