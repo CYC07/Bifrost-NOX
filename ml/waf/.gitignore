@@ -4,3 +4,6 @@ data/build/
 # Your ingested data (downloads / VulnHub / writeups) — add deliberately
 data/external/*
 !data/external/.gitkeep
+# Captured live traffic — contains real request URLs/bodies, never commit
+shadow_verdicts.jsonl
+shadow_clean.jsonl
