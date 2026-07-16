@@ -123,3 +123,38 @@ def test_predictor_blocks_attacks(fitted_classifier, payload, expected):
 def test_predictor_allows_benign(fitted_classifier, benign):
     p = fitted_classifier.predict(benign)
     assert p.blocked is False
+
+
+# --- ingest CLIs -----------------------------------------------------------
+def test_ingest_csv_writes_mapped_jsonl(tmp_path, monkeypatch):
+    from ml.waf import ingest
+    import argparse
+
+    monkeypatch.setattr(ingest, "EXTERNAL_DIR", str(tmp_path))
+    csv_path = tmp_path / "src.csv"
+    csv_path.write_text("payload,verdict\n' OR 1=1--,Anomaly\nhello,Normal\n", encoding="utf-8")
+
+    args = argparse.Namespace(file=str(csv_path), text_col="payload", label_col="verdict",
+                              map="Anomaly=sqli,Normal=clean", source="unit")
+    ingest.cmd_csv(args)
+
+    out = tmp_path / "unit.jsonl"
+    assert out.exists()
+    labels = sorted(json.loads(l)["label"] for l in out.read_text().splitlines())
+    assert labels == ["clean", "sqli"]
+
+
+def test_ingest_writeup_writes_review_with_blank_labels(tmp_path, monkeypatch):
+    from ml.waf import ingest
+    import argparse
+
+    monkeypatch.setattr(ingest, "EXTERNAL_DIR", str(tmp_path))
+    md = tmp_path / "box.md"
+    md.write_text("## SQLi\n```\ncurl 'http://t/?id=1 UNION SELECT 1,2'\n```\n", encoding="utf-8")
+
+    ingest.cmd_writeup(argparse.Namespace(files=[str(md)]))
+
+    out = tmp_path / "review_box.jsonl"
+    assert out.exists()
+    rec = json.loads(out.read_text().splitlines()[0])
+    assert rec["label"] == "" and rec["hint"] == "SQLi"      # unlabeled, for review
