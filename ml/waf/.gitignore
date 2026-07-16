@@ -1,0 +1,6 @@
+# Regenerable — rebuild with `python -m ml.waf.build_dataset` / `train`
+artifacts/
+data/build/
+# Your ingested data (downloads / VulnHub / writeups) — add deliberately
+data/external/*
+!data/external/.gitkeep
