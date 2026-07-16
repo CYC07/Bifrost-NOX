@@ -6,6 +6,7 @@ PyMuPDF and yara-python are required; tests skip cleanly if missing.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import os
 import sys
@@ -125,19 +126,19 @@ EICAR = (
 
 
 def test_malware_eicar_match():
-    result = malware_model.analyze(EICAR)
+    result = asyncio.run(malware_model.analyze(EICAR))
     assert result.score >= 0.9
     assert any("EICAR" in f for f in result.findings)
 
 
 def test_malware_macro_rule_match():
-    result = malware_model.analyze(_make_fake_docx_with_macro())
+    result = asyncio.run(malware_model.analyze(_make_fake_docx_with_macro()))
     assert result.score >= 0.9
     assert any("VBA" in f or "Macro" in f for f in result.findings)
 
 
 def test_malware_clean_pdf_no_match():
-    result = malware_model.analyze(_make_clean_pdf())
+    result = asyncio.run(malware_model.analyze(_make_clean_pdf()))
     assert result.score == 0.0
 
 

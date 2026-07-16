@@ -46,7 +46,9 @@ Device (phone/laptop)
 - **Static rule engine** — IP/port/domain/keyword rules evaluated before AI inference; configurable via the dashboard
 - **Allowlist for cert-pinned apps** — WhatsApp, Snapchat, Signal, Telegram, and any other app that pins its TLS certificate can be allowlisted to tunnel through uninspected; all others are blocked by default if MITM fails
 - **Real-time dashboard** — live KPI cards, threat feed, traffic charts, rule management, and AI file intake at `http://localhost:8000`
+- **DNS-layer domain filtering** — the NFQUEUE path (C++ engine → ZMQ → `ai_brain`) parses each DNS query and blocks domains matching `config/dns_blocklist.json` or a `domain` rule in the rule engine; complements the proxy's content filtering
 - **C++ packet engine** — NFQUEUE handler with 10-second flow cache; fail-open by default so network access is never fully blocked
+- **Control-plane authentication** — state-changing endpoints (rules, allowlist, test) and internal ingest (`/analyze_traffic`, `/log_event`) require a loopback client or a valid `FIREWALL_ADMIN_TOKEN`, so hotspot clients cannot rewrite firewall policy or bypass inspection
 - **VirusTotal integration** — SHA-256 hash lookup on every scanned document; optional (set `VIRUSTOTAL_API_KEY` in `.env`); fails open so the service works without a key
 - **Host-only proxy binding** — MITM proxy auto-detects the hotspot interface IP and binds exclusively to it, ensuring the firewall host's own traffic is never intercepted
 
@@ -197,6 +199,28 @@ echo "VIRUSTOTAL_API_KEY=your_key_here" > .env
 
 ---
 
+## Control-Plane Authentication
+
+The orchestrator on `:8000` is reachable by hotspot clients, so admin actions are gated. Requests to state-changing endpoints (`POST/DELETE /rules`, `/allowlist`, `/test_attack`) and internal ingest (`/analyze_traffic`, `/log_event`) are allowed only when they come from a **loopback client** (the operator on `localhost`) or carry a valid admin token. Read-only dashboard GETs stay open.
+
+The operator on `localhost` needs no configuration. To administer from another machine, set a token in `.env`:
+
+```bash
+echo "FIREWALL_ADMIN_TOKEN=$(openssl rand -hex 24)" >> .env
+```
+
+Then send it as a header (`X-Admin-Token: <token>`) or query param (`?token=<token>`). Without a token set, only loopback can mutate policy.
+
+```bash
+# From a remote admin host:
+curl -X POST http://<firewall-ip>:8000/allowlist \
+  -H "X-Admin-Token: $FIREWALL_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"host": "*.example.com"}'
+```
+
+---
+
 ## Network Topology (hotspot mode)
 
 | Item | Value |
@@ -214,7 +238,7 @@ echo "VIRUSTOTAL_API_KEY=your_key_here" > .env
 ```
 ai_firewall/
 ├── common/               # Shared schemas, utilities, allowlist module
-├── config/               # Persisted rules and allowlist (JSON)
+├── config/               # Persisted rules, allowlist, and DNS blocklist (JSON)
 ├── dashboard/            # React 18 + Babel frontend (served by orchestrator)
 ├── document_service/     # YARA + VirusTotal, metadata forensics, structural anomaly, content keywords
 ├── gateway/              # MITM proxy, TLS engine, certificate authority
