@@ -1,0 +1,90 @@
+"""Inference wrapper for the WAF classifier.
+
+Loads a trained model (the char-n-gram baseline now, or a Colab-trained
+transformer exported to the same interface later) and returns a calibrated
+decision. Fail-open: a missing or broken model yields a ``clean`` allow with a
+note, never an exception — matching the firewall's fail-open philosophy.
+
+The model path is config-driven via ``WAF_MODEL_PATH`` so Colab weights drop in
+with no code change.
+"""
+from __future__ import annotations
+
+import logging
+import os
+from dataclasses import dataclass, field
+
+from ml.waf.taxonomy import RISK, is_attack
+
+logger = logging.getLogger("waf.predictor")
+
+_HERE = os.path.dirname(__file__)
+DEFAULT_MODEL_PATH = os.getenv(
+    "WAF_MODEL_PATH", os.path.join(_HERE, "artifacts", "waf_baseline.joblib")
+)
+DEFAULT_THRESHOLD = float(os.getenv("WAF_THRESHOLD", "0.5"))
+
+
+@dataclass
+class WAFPrediction:
+    label: str                     # top predicted class
+    score: float                   # probability of the top class
+    blocked: bool                  # calibrated decision
+    risk: str                      # taxonomy risk level for the label
+    scores: dict[str, float] = field(default_factory=dict)
+    note: str = ""
+
+
+class WAFClassifier:
+    def __init__(self, model_path: str = DEFAULT_MODEL_PATH, threshold: float = DEFAULT_THRESHOLD) -> None:
+        self.model_path = model_path
+        self.threshold = threshold
+        self._pipeline = None
+        self._labels: list[str] = []
+        self._loaded = False
+
+    def load(self) -> bool:
+        try:
+            import joblib
+            bundle = joblib.load(self.model_path)
+            self._pipeline = bundle["pipeline"]
+            self._labels = bundle["labels"]
+            self._loaded = True
+            logger.info("WAF model loaded from %s (%d classes)", self.model_path, len(self._labels))
+        except Exception as exc:  # noqa: BLE001 — fail open
+            logger.warning("WAF model load failed (%s) — fail-open to clean", exc)
+            self._loaded = False
+        return self._loaded
+
+    def predict(self, text: str) -> WAFPrediction:
+        if not self._loaded:
+            return WAFPrediction("clean", 0.0, False, "safe", note="model not loaded")
+        if not text or not text.strip():
+            return WAFPrediction("clean", 0.0, False, "safe")
+        try:
+            proba = self._pipeline.predict_proba([text])[0]
+            scores = {label: float(p) for label, p in zip(self._pipeline.classes_, proba)}
+            top_label = max(scores, key=scores.get)
+            top_score = scores[top_label]
+            blocked = is_attack(top_label) and top_score >= self.threshold
+            return WAFPrediction(
+                label=top_label,
+                score=top_score,
+                blocked=blocked,
+                risk=RISK.get(top_label, "medium"),
+                scores=scores,
+            )
+        except Exception as exc:  # noqa: BLE001 — fail open on any inference error
+            logger.error("WAF inference failed: %s", exc)
+            return WAFPrediction("clean", 0.0, False, "safe", note=f"inference error: {exc}")
+
+
+_singleton: WAFClassifier | None = None
+
+
+def get_classifier() -> WAFClassifier:
+    global _singleton
+    if _singleton is None:
+        _singleton = WAFClassifier()
+        _singleton.load()
+    return _singleton
