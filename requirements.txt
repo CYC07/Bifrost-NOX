@@ -13,6 +13,7 @@ requests
 # Image Analysis (Vision AI)
 torch --index-url https://download.pytorch.org/whl/cpu
 transformers
+sentencepiece  # DeBERTa-v3 tokenizer for text_service sensitive-content model
 ultralytics
 pytesseract
 clip
