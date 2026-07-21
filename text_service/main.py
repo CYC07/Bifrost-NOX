@@ -10,12 +10,12 @@ import re
 import dataclasses
 from contextlib import asynccontextmanager
 from presidio_analyzer import AnalyzerEngine
-from sentence_transformers import SentenceTransformer, util
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from common.schemas import VerdictStatus, AggregatedVerdict, RiskLevel, AnalysisResult
 from common.utils import setup_logging
 from ml.waf.predictor import WAFClassifier
+from ml.sensitive.predictor import SensitiveClassifier
 
 setup_logging("text_service")
 logger = logging.getLogger("text_service")
@@ -26,34 +26,34 @@ logger = logging.getLogger("text_service")
 WAF_ATTACK_THRESHOLD = float(os.getenv("WAF_ATTACK_THRESHOLD", "0.8"))
 
 # --- GLOBAL MODELS ---
-semantic_model = None
 presidio_analyzer = None
-dangerous_embeddings = None
 waf_classifier = None
-
-DANGEROUS_CONCEPTS = [
-    "leak confidential internal data",
-    "attack corporate network infrastructure",
-    "bypass firewall security controls",
-    "steal password and credentials",
-    "proprietary algorithm source code",
-    "financial revenue report q3",
-    "employee salary list"
-]
+sensitive_classifier = None
 
 async def load_models():
-    global semantic_model, presidio_analyzer, dangerous_embeddings, waf_classifier
+    global presidio_analyzer, waf_classifier, sensitive_classifier
     logger.info("Loading NLP Models...")
     try:
-        semantic_model = SentenceTransformer('all-MiniLM-L6-v2')
-        dangerous_embeddings = semantic_model.encode(DANGEROUS_CONCEPTS, convert_to_tensor=True)
         presidio_analyzer = AnalyzerEngine()
-        logger.info("NLP Models Loaded Successfully.")
+        logger.info("Presidio PII analyzer loaded.")
     except Exception as e:
-        logger.error(f"Failed to load NLP models: {e}")
+        logger.error(f"Failed to load Presidio: {e}")
+
+    # Sensitive-content zero-shot classifier (DeBERTa-v3 NLI) — replaces the old
+    # MiniLM cosine heuristic. Loaded separately, fail-open.
+    try:
+        sensitive_classifier = SensitiveClassifier()
+        if sensitive_classifier.load():
+            logger.info("Sensitive-content model loaded (threshold %.2f).", sensitive_classifier.threshold)
+        else:
+            logger.error("Sensitive model failed to load — sensitive analyzer disabled.")
+            sensitive_classifier = None
+    except Exception as e:
+        logger.error(f"Failed to load sensitive model: {e}")
+        sensitive_classifier = None
 
     # WAF web-attack classifier (our own trained model) — loaded separately so a
-    # failure here never takes down the NLP models, and vice versa.
+    # failure here never takes down the other models, and vice versa.
     try:
         waf_classifier = WAFClassifier(threshold=WAF_ATTACK_THRESHOLD)
         if waf_classifier.load():
@@ -65,28 +65,25 @@ async def load_models():
         logger.error(f"Failed to load WAF model: {e}")
         waf_classifier = None
 
-def model_nlp_semantic(text):
-    if not semantic_model:
-        return AnalysisResult(module="nlp", score=0.0, findings=["Model not loaded"])
+def model_sensitive(text):
+    """Zero-shot sensitive-content detection (DeBERTa-v3 NLI) — replaces the old
+    MiniLM cosine heuristic. Emits a decisive score only on the model's own
+    calibrated block decision, so its verdict survives the max-score aggregation.
+    Below threshold it contributes nothing (public/benign text scores near zero)."""
+    if not sensitive_classifier:
+        return AnalysisResult(module="sensitive", score=0.0, findings=["Sensitive model not loaded"])
     try:
-        text_emb = semantic_model.encode(text, convert_to_tensor=True)
-        cosine_scores = util.cos_sim(text_emb, dangerous_embeddings)[0]
-        max_score_tensor = cosine_scores.max()
-        best_match_idx = cosine_scores.argmax()
-        score_val = float(max_score_tensor)
-        findings = []
-        risk_score = 0.0
-        if score_val > 0.5: 
-            matched_concept = DANGEROUS_CONCEPTS[best_match_idx]
-            findings.append(f"Semantic Threat Detected: '{matched_concept}' (Confidence: {score_val:.2f})")
-            risk_score = 0.8
-        elif score_val > 0.35:
-            findings.append(f"Potential Semantic Risk ({score_val:.2f})")
-            risk_score = 0.4
-        return AnalysisResult(module="nlp", score=risk_score, findings=findings)
+        pred = sensitive_classifier.predict(text)
+        if pred.blocked:
+            return AnalysisResult(
+                module="sensitive",
+                score=0.9,  # decisive -> BLOCK in aggregation
+                findings=[f"Sensitive content: {pred.label} (risk={pred.risk}, conf={pred.score:.2f})"],
+            )
+        return AnalysisResult(module="sensitive", score=0.0, findings=[])
     except Exception as e:
-        logger.error(f"NLP Error: {e}")
-        return AnalysisResult(module="nlp", score=0.0, findings=[])
+        logger.error(f"Sensitive Error: {e}")
+        return AnalysisResult(module="sensitive", score=0.0, findings=[])
 
 def model_code_analysis(text):
     findings = []
@@ -155,7 +152,7 @@ async def analyze_text(request: Request):
     
     logger.info(f"Analyzing text length: {len(text)}")
     
-    r1 = model_nlp_semantic(text)
+    r1 = model_sensitive(text)
     r2 = model_code_analysis(text)
     r3 = model_patterns(text)
     r4 = model_web_attack(text)
