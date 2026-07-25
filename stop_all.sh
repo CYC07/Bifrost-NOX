@@ -63,6 +63,8 @@ stop_pattern "C++ Firewall Engine"   "firewall_engine"
 stop_pattern "AI Brain"              "network_inspector/ai_brain.py"
 stop_pattern "Gateway Proxy"         "gateway/proxy.py"
 stop_pattern "AI Microservices"      "uvicorn"
+# Force-free port 8080 regardless of process state (handles crashed/zombie processes).
+fuser -k 8080/tcp 2>/dev/null || true
 
 if pgrep -af 'uvicorn|gateway/proxy.py|ai_brain.py|firewall_engine' >/dev/null; then
     echo "  WARN: some processes survived:"
