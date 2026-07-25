@@ -254,78 +254,105 @@ class TransparentProxy:
         except Exception:
             pass
 
+    # Above this many buffered bytes without a complete message, stop trying to
+    # inspect and stream the rest raw (large downloads, non-HTTP tunnels, etc.).
+    MAX_INSPECT_BYTES = 10 * 1024 * 1024
+
+    def _block_response(self) -> bytes:
+        html = (
+            b"<html><head><meta charset='utf-8'><title>Blocked</title></head>"
+            b"<body style='font-family:sans-serif;background:#0b0f14;color:#e6edf3;"
+            b"text-align:center;padding-top:12vh'>"
+            b"<h1 style='color:#ff5c5c'>Blocked by Bifrost N\xc3\x98X</h1>"
+            b"<p>This content was flagged by the AI firewall and was not delivered.</p>"
+            b"</body></html>"
+        )
+        return (
+            b"HTTP/1.1 403 Forbidden\r\n"
+            b"Content-Type: text/html; charset=utf-8\r\n"
+            b"Content-Length: " + str(len(html)).encode() + b"\r\n"
+            b"Connection: close\r\n\r\n" + html
+        )
+
     async def pipe(self, client_r, client_w, server_r, server_w, is_https,
                    client_ip="unknown", server_name="unknown", dest_ip="unknown", dest_port=""):
-        # We need two parsers for HTTP traffic
-        client_parser = HTTPParser()
-        server_parser = HTTPParser()
 
-        async def forward(reader, writer, parser, direction):
+        async def handle_message(parser, writer, direction) -> bool:
+            """Inspect one complete message. Forward raw on allow, serve the
+            block page to the client on block. Returns False if blocked."""
+            host_header = (parser.headers.get("host", "") or "").split(":")[0].strip()
+            real_dst = host_header or server_name or dest_ip
+            if direction == "outbound":
+                src, dst = client_ip, real_dst
+            else:
+                src, dst = real_dst, client_ip
+            verdict = await self.inspector.inspect_full(
+                parser.headers, parser.body, direction, is_https,
+                src_ip=src, dst_ip=dst, dst_port=dest_port,
+            )
+            if verdict == "block":
+                # Always inform the client, whichever direction tripped.
+                try:
+                    client_w.write(self._block_response())
+                    await client_w.drain()
+                except Exception:
+                    pass
+                return False
+            writer.write(parser.raw)   # exact wire bytes, never re-encoded
+            await writer.drain()
+            return True
+
+        async def forward(reader, writer, role, direction):
+            parser = HTTPParser(role=role)
+            passthrough = False
             try:
-                msg_buffer = b""
                 while True:
                     data = await reader.read(8192)
-                    if not data: break
-                    
-                    # Logic: Buffer untill full HTTP message is ready OR streaming
-                    if self.inspector:
-                        parser.parse(data)
-                        msg_buffer += data
-                        
-                        # Check header completion
-                        if parser.header_done:
-                            # if content length known and we have it all
-                            if len(parser.body) >= parser.content_length:
-                                # We have full message!
-                                # Prefer the actual hostname the client wanted:
-                                # - HTTPS: SNI (already in server_name)
-                                # - HTTP:  Host header from parsed request
-                                # Fall back to server_name (SNI/dest_ip) then raw dest_ip
-                                host_header = (parser.headers.get("host", "") or "").split(":")[0].strip()
-                                real_dst = host_header or server_name or dest_ip
-                                if direction == "outbound":
-                                    src, dst = client_ip, real_dst
-                                else:
-                                    src, dst = real_dst, client_ip
-                                verdict = await self.inspector.inspect_full(
-                                    parser.headers, parser.body, direction, is_https,
-                                    src_ip=src, dst_ip=dst, dst_port=dest_port
-                                )
-                                if verdict == "block":
-                                    # Send Block Page logic if needed, or resets
-                                    break
-                                
-                                # Flush buffer
-                                writer.write(msg_buffer)
-                                await writer.drain()
-                                msg_buffer = b""
-                                # Reset parser for next request (keep alive)
-                                # For simplicity in prototype: we don't reset perfectly for keep-alive pipelines
-                                # We assuming one request per connection or simply stream subsequent ones
-                                server_parser.__init__() 
-                            else:
-                                # Buffering...
-                                pass
-                        else:
-                            # Buffering headers...
-                            pass
-                        
-                        # Safety: If buffer too large (>10MB), Flush to avoid DOS
-                        if len(msg_buffer) > 10 * 1024 * 1024:
-                             writer.write(msg_buffer)
-                             await writer.drain()
-                             msg_buffer = b""
+                    if not data:
+                        if not passthrough:
+                            parser.feed_eof()
+                            if parser.message_complete:
+                                await handle_message(parser, writer, direction)
+                        break
 
-                    else:
+                    if passthrough or not self.inspector:
                         writer.write(data)
                         await writer.drain()
-            except Exception as e:
+                        continue
+
+                    parser.feed(data)
+                    blocked = False
+                    while parser.message_complete:
+                        ok = await handle_message(parser, writer, direction)
+                        if not ok:
+                            blocked = True
+                            break
+                        leftover = parser.take_leftover()
+                        parser.reset()
+                        if leftover:
+                            parser.feed(leftover)
+                        else:
+                            break
+                    if blocked:
+                        break
+
+                    # Bail out to raw passthrough for oversized / non-HTTP streams
+                    # so we never buffer a connection to death.
+                    if not parser.message_complete and len(parser.unforwarded) > self.MAX_INSPECT_BYTES:
+                        pending = parser.unforwarded
+                        parser.reset()
+                        passthrough = True
+                        writer.write(pending)
+                        await writer.drain()
+            except Exception:
                 pass
             finally:
-                try: writer.close()
-                except: pass
+                try:
+                    writer.close()
+                except Exception:
+                    pass
 
         await asyncio.gather(
-            forward(client_r, server_w, client_parser, "outbound"),
-            forward(server_r, client_w, server_parser, "inbound")
+            forward(client_r, server_w, "request", "outbound"),
+            forward(server_r, client_w, "response", "inbound"),
         )

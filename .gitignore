@@ -24,3 +24,5 @@ Model_installation/
 *.pt
 *.onnx
 *.bin
+gnirehtet-rust-linux64/
+CLAUDE.original.md

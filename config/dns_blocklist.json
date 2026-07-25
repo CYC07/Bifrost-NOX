@@ -1,0 +1,13 @@
+{
+  "_comment": "Domains blocked at the DNS layer by the NFQUEUE path (ai_brain + C++ engine). Suffix match on label boundaries: an entry blocks the domain and all its subdomains. Edit and restart ai_brain to reload.",
+  "domains": [
+    "malware.wicar.org",
+    "testmyids.com",
+    "eicar.org",
+    "malware.testing.google.test",
+    "phishing.example",
+    "doubleclick.net",
+    "googlesyndication.com",
+    "adservice.google.com"
+  ]
+}
