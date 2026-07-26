@@ -158,3 +158,83 @@ def test_ingest_writeup_writes_review_with_blank_labels(tmp_path, monkeypatch):
     assert out.exists()
     rec = json.loads(out.read_text().splitlines()[0])
     assert rec["label"] == "" and rec["hint"] == "SQLi"      # unlabeled, for review
+
+
+# --- transformer backend ----------------------------------------------------
+DISTILBERT_DIR = os.path.join(
+    os.path.dirname(__file__), "..", "ml", "waf", "artifacts", "waf_distilbert"
+)
+needs_distilbert = pytest.mark.skipif(
+    not os.path.isdir(DISTILBERT_DIR), reason="DistilBERT artifact not present"
+)
+
+
+def test_transformer_fail_open_when_dir_missing():
+    c = WAFClassifier(model_path="/nonexistent/waf_distilbert")
+    assert c.load() is False
+    p = c.predict("id=1' OR '1'='1")
+    assert p.blocked is False and p.label == "clean"
+
+
+@pytest.fixture(scope="module")
+def transformer_classifier():
+    c = WAFClassifier(model_path=DISTILBERT_DIR)
+    assert c.load() is True
+    return c
+
+
+@needs_distilbert
+def test_transformer_loads_labels_in_taxonomy_order(transformer_classifier):
+    assert transformer_classifier._labels == taxonomy.LABELS
+
+
+@needs_distilbert
+@pytest.mark.parametrize(
+    "payload,expected",
+    [
+        ("id=1' OR '1'='1--", "sqli"),
+        ("<script>alert(1)</script>", "xss"),
+        ("file=../../../../etc/passwd", "path_traversal"),
+    ],
+)
+def test_transformer_blocks_attacks(transformer_classifier, payload, expected):
+    p = transformer_classifier.predict(payload)
+    assert p.blocked is True
+    assert p.label == expected
+
+
+@needs_distilbert
+@pytest.mark.parametrize(
+    "benign",
+    [
+        "The weather in London is expected to be sunny with light winds.",
+        "http://localhost:8080/tienda1/publico/anadir.jsp?id=2&nombre=Vino&precio=39",
+    ],
+)
+def test_transformer_allows_benign_in_distribution(transformer_classifier, benign):
+    p = transformer_classifier.predict(benign)
+    assert p.blocked is False
+
+
+@needs_distilbert
+@pytest.mark.xfail(
+    reason="known weakness: current DistilBERT confidently flags OOD benign "
+    "(bare query params) as attacks — clean-corpus retrain required before it "
+    "can become the default backend",
+    strict=True,
+)
+@pytest.mark.parametrize(
+    "benign",
+    ["q=best pizza near me", "category=electronics&brand=sony"],
+)
+def test_transformer_allows_benign_out_of_distribution(transformer_classifier, benign):
+    p = transformer_classifier.predict(benign)
+    assert p.blocked is False
+
+
+@needs_distilbert
+def test_transformer_prediction_contract(transformer_classifier):
+    p = transformer_classifier.predict("id=1' OR '1'='1--")
+    assert set(p.scores) == set(taxonomy.LABELS)
+    assert abs(sum(p.scores.values()) - 1.0) < 1e-3          # softmax distribution
+    assert p.risk in {"safe", "low", "medium", "high", "critical"}
