@@ -27,6 +27,13 @@ class AnalysisResult:
     score: float # 0.0 to 1.0 confidence
     findings: List[str] # List of detected items/threats
     raw_data: Optional[Dict[str, Any]] = None
+    # Each analyzer's own calibrated decision — set using whatever threshold
+    # makes sense for that specific model/heuristic. Aggregation ORs these
+    # rather than re-interpreting raw scores against one shared cutoff, since
+    # scores from different analyzers (regex hit, softmax confidence, PII
+    # entity score) aren't on a comparable scale.
+    blocked: bool = False
+    risk: RiskLevel = RiskLevel.SAFE
 
 @dataclass
 class AggregatedVerdict:
