@@ -76,12 +76,21 @@ def _contact_form(fake: Faker, rng: random.Random) -> str:
     return "&".join(f"{k}={fields[k]}" for k in keys)
 
 
+def _iso8601(rng: random.Random) -> str:
+    # Built from our own seeded rng, not Faker's iso8601() — that provider's
+    # microsecond field draws from real wall-clock jitter, not the seeded
+    # generator, which broke determinism (same seed, different output).
+    y, mo, d = rng.randint(1990, 2026), rng.randint(1, 12), rng.randint(1, 28)
+    h, mi, s, us = rng.randint(0, 23), rng.randint(0, 59), rng.randint(0, 59), rng.randint(0, 999999)
+    return f"{y:04d}-{mo:02d}-{d:02d}T{h:02d}:{mi:02d}:{s:02d}.{us:06d}"
+
+
 def _api_json(fake: Faker, rng: random.Random) -> str:
     payload = {
         "user_id": rng.randint(1000, 99999),
         "action": rng.choice(["view", "update", "delete", "create", "list"]),
         "token": fake.sha256()[:32],
-        "timestamp": fake.iso8601(),
+        "timestamp": _iso8601(rng),
     }
     if rng.random() < 0.5:
         payload["email"] = fake.email()
