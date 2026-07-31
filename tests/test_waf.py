@@ -209,6 +209,10 @@ def test_transformer_blocks_attacks(transformer_classifier, payload, expected):
     [
         "The weather in London is expected to be sunny with light winds.",
         "http://localhost:8080/tienda1/publico/anadir.jsp?id=2&nombre=Vino&precio=39",
+        # Fixed by the 2026-07-31 clean-corpus retrain (FWAF/ECML/Zanbil/URL-rep,
+        # 70k real-traffic samples) — was xfail before, now genuinely passes even
+        # at this test's strict WAF_THRESHOLD default of 0.5 (production runs 0.8).
+        "category=electronics&brand=sony",
     ],
 )
 def test_transformer_allows_benign_in_distribution(transformer_classifier, benign):
@@ -218,17 +222,29 @@ def test_transformer_allows_benign_in_distribution(transformer_classifier, benig
 
 @needs_distilbert
 @pytest.mark.xfail(
-    reason="known weakness: current DistilBERT confidently flags OOD benign "
-    "(bare query params) as attacks — clean-corpus retrain required before it "
-    "can become the default backend",
+    reason="known weakness: bare simple-English key=value query strings remain "
+    "thin in the clean corpus (goodqueries.txt is 96% pathless URLs, not "
+    "key=value pairs) — still fails at this test's 0.5 threshold though it "
+    "clears production's 0.8 WAF_THRESHOLD",
     strict=True,
 )
-@pytest.mark.parametrize(
-    "benign",
-    ["q=best pizza near me", "category=electronics&brand=sony"],
-)
+@pytest.mark.parametrize("benign", ["q=best pizza near me"])
 def test_transformer_allows_benign_out_of_distribution(transformer_classifier, benign):
     p = transformer_classifier.predict(benign)
+    assert p.blocked is False
+
+
+@needs_distilbert
+@pytest.mark.xfail(
+    reason="known weakness: benign login/credential-style POST bodies "
+    "(username=admin&password=...) remain unrepresented in any available "
+    "public benign corpus (nobody publishes real form bodies) — blocks at "
+    "0.999 confidence, clears no reasonable threshold. Needs synthesized "
+    "(faker-generated) benign form/JSON bodies, not more scraped URLs.",
+    strict=True,
+)
+def test_transformer_allows_benign_login_form(transformer_classifier):
+    p = transformer_classifier.predict("username=admin&password=secret123")
     assert p.blocked is False
 
 
