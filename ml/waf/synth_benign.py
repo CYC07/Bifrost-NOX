@@ -98,7 +98,15 @@ _DOMAINS = {
 
 
 def generate(count: int, seed: int = 42) -> list[dict]:
-    """Deterministic (same seed -> same output) synthetic benign corpus."""
+    """Deterministic (same seed -> same output) synthetic benign corpus.
+
+    Faker.seed() (the classmethod) reseeds the shared/default generator that
+    ALL Faker() instances draw from process-wide — instance-level
+    seed_instance() alone isn't reliably isolated from earlier Faker()
+    instantiations in the same process (observed flaky determinism in tests
+    when multiple generate() calls with different seeds run back-to-back).
+    """
+    Faker.seed(seed)
     rng = random.Random(seed)
     fake = Faker()
     fake.seed_instance(seed)
