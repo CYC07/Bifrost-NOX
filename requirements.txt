@@ -40,3 +40,6 @@ sentence-transformers
 # Utilities
 python-dateutil
 psutil
+
+# WAF dataset tooling (ml/waf/) — not runtime firewall deps
+Faker  # synthetic benign form/JSON bodies for the clean-corpus gap
