@@ -6,6 +6,7 @@ seed so the tests need no committed model artifact.
 """
 import json
 import os
+import re
 import sys
 
 import pytest
@@ -254,3 +255,59 @@ def test_transformer_prediction_contract(transformer_classifier):
     assert set(p.scores) == set(taxonomy.LABELS)
     assert abs(sum(p.scores.values()) - 1.0) < 1e-3          # softmax distribution
     assert p.risk in {"safe", "low", "medium", "high", "critical"}
+
+
+# --- synthetic benign form/JSON bodies --------------------------------------
+from ml.waf import synth_benign  # noqa: E402
+
+# Substrings that would mean a "clean" sample accidentally looks like an attack
+# (Faker's random text can occasionally emit quotes/braces by chance).
+_ATTACK_LEAK_RE = re.compile(
+    r"' OR |<script|\.\./|;\s*(cat|id|whoami)|\{\{.*\}\}|UNION SELECT", re.IGNORECASE
+)
+
+
+def test_synth_generates_requested_count():
+    recs = synth_benign.generate(200, seed=1)
+    assert len(recs) == 200
+
+
+def test_synth_all_records_labeled_clean():
+    recs = synth_benign.generate(200, seed=1)
+    assert all(r["label"] == "clean" for r in recs)
+
+
+def test_synth_deterministic_with_seed():
+    a = synth_benign.generate(50, seed=7)
+    b = synth_benign.generate(50, seed=7)
+    assert [r["text"] for r in a] == [r["text"] for r in b]
+
+
+def test_synth_covers_multiple_domains():
+    recs = synth_benign.generate(500, seed=1)
+    sources = {r["source"] for r in recs}
+    assert len(sources) >= 4, f"expected multiple form domains, got {sources}"
+
+
+def test_synth_has_structured_bodies():
+    # Every record is either a key=value form body or a JSON API payload —
+    # never unstructured free English prose.
+    recs = synth_benign.generate(200, seed=1)
+    structured = [r for r in recs if "=" in r["text"] or (r["text"].startswith("{") and r["text"].endswith("}"))]
+    assert len(structured) == len(recs)
+
+
+def test_synth_varied_key_names_in_login_domain():
+    recs = [r for r in synth_benign.generate(300, seed=1) if r["source"] == "synth_login"]
+    assert recs, "no login-domain samples generated"
+    key_sets = set()
+    for r in recs:
+        keys = tuple(sorted(kv.split("=")[0] for kv in r["text"].split("&") if "=" in kv))
+        key_sets.add(keys)
+    assert len(key_sets) >= 3, f"login form key names too uniform: {key_sets}"
+
+
+def test_synth_no_attack_pattern_leakage():
+    recs = synth_benign.generate(2000, seed=1)
+    leaked = [r["text"] for r in recs if _ATTACK_LEAK_RE.search(r["text"])]
+    assert not leaked, f"synthetic benign data leaked attack-like patterns: {leaked[:5]}"
