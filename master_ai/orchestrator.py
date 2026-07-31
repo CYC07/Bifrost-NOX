@@ -661,6 +661,15 @@ class AdminAuthMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+async def serve_ca_cert(request: Request) -> FileResponse:
+    ca_path = os.path.join(os.path.dirname(__file__), "..", "gateway", "certs", "ca.crt")
+    return FileResponse(
+        path=ca_path,
+        media_type="application/x-x509-ca-cert",
+        filename="FYP-AI-Firewall-CA.crt",
+    )
+
+
 middleware = [
     Middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]),
     Middleware(AdminAuthMiddleware),
@@ -687,6 +696,7 @@ routes = [
     Route("/uploads", list_uploads, methods=["GET"]),
     Route("/overview", get_overview, methods=["GET"]),
     Route("/", root, methods=["GET"]),
+    Route("/ca.crt", serve_ca_cert, methods=["GET"]),
     Mount("/dashboard", StaticFiles(directory="dashboard", html=True), name="dashboard"),
 ]
 
