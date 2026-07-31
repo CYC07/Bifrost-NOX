@@ -13,6 +13,7 @@ requests
 # Image Analysis (Vision AI)
 torch --index-url https://download.pytorch.org/whl/cpu
 transformers
+sentencepiece  # DeBERTa-v3 tokenizer for text_service sensitive-content model
 ultralytics
 pytesseract
 clip
@@ -39,3 +40,6 @@ sentence-transformers
 # Utilities
 python-dateutil
 psutil
+
+# WAF dataset tooling (ml/waf/) — not runtime firewall deps
+Faker  # synthetic benign form/JSON bodies for the clean-corpus gap
