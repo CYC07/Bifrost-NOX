@@ -25,7 +25,7 @@ logger = logging.getLogger("waf.predictor")
 
 _HERE = os.path.dirname(__file__)
 DEFAULT_MODEL_PATH = os.getenv(
-    "WAF_MODEL_PATH", os.path.join(_HERE, "artifacts", "waf_baseline.joblib")
+    "WAF_MODEL_PATH", os.path.join(_HERE, "artifacts", "waf_distilbert")
 )
 DEFAULT_THRESHOLD = float(os.getenv("WAF_THRESHOLD", "0.5"))
 # Must match the tokenizer max_length used in Colab fine-tuning.
