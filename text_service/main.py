@@ -6,7 +6,6 @@ import uvicorn
 import sys
 import os
 import logging
-import re
 import dataclasses
 from contextlib import asynccontextmanager
 from presidio_analyzer import AnalyzerEngine
@@ -16,6 +15,7 @@ from common.schemas import VerdictStatus, AggregatedVerdict, RiskLevel, Analysis
 from common.utils import setup_logging
 from ml.waf.predictor import WAFClassifier
 from ml.sensitive.predictor import SensitiveClassifier
+from ml.secrets.detector import detect as detect_secrets
 
 setup_logging("text_service")
 logger = logging.getLogger("text_service")
@@ -87,25 +87,23 @@ def model_sensitive(text):
         return AnalysisResult(module="sensitive", score=0.0, findings=[])
 
 def model_code_analysis(text):
-    """Secret detection via regex — deterministic, kept on purpose (precision
-    beats a model here). The old eval(/exec(/os.system( substring check was
-    removed: it's a bare string-contains with no context, and the WAF
-    command_injection class already does real semantic RCE detection."""
-    findings = []
-    blocked = False
-    patterns = {
-        "AWS Access Key": r"AKIA[0-9A-Z]{16}",
-        "Google API Key": r"AIza[0-9A-Za-z\\-_]{35}",
-        "Private Key Header": r"-----BEGIN (RSA|DSA|EC|OPENSSH) PRIVATE KEY-----",
-        "Generic Secret": r"(?i)(api_key|secret|password)[\s]*=[\s]*['\"][0-9a-zA-Z\-_]{16,}['\"]"
-    }
-    for name, pattern in patterns.items():
-        if re.search(pattern, text):
-            findings.append(f"Secret Detected: {name}")
-            blocked = True
-    score = 1.0 if blocked else 0.0
-    risk = RiskLevel.CRITICAL if blocked else RiskLevel.SAFE
-    return AnalysisResult(module="code", score=score, findings=findings, blocked=blocked, risk=risk)
+    """Secret detection — deterministic regex (ml/secrets/), kept on purpose
+    (precision beats a model here; see ml/secrets/patterns.py). Vendor-specific
+    patterns + structural validation (JWT) + known-placeholder exclusion, added
+    2026-08-01 to cut false positives beyond the original 4 generic patterns.
+    The old eval(/exec(/os.system( substring check was removed separately: it
+    was a bare string-contains with no context, and the WAF command_injection
+    class already does real semantic RCE detection."""
+    try:
+        secret_findings = detect_secrets(text)
+    except Exception as e:
+        logger.error(f"Secret detection error: {e}")
+        return AnalysisResult(module="code", score=0.0, findings=[])
+    if not secret_findings:
+        return AnalysisResult(module="code", score=0.0, findings=[])
+    findings = [f"Secret Detected: {f.kind} (severity={f.severity})" for f in secret_findings]
+    risk = max((RiskLevel(f.severity) for f in secret_findings), key=list(RiskLevel).index)
+    return AnalysisResult(module="code", score=1.0, findings=findings, blocked=True, risk=risk)
 
 def model_patterns(text):
     """Presidio PII detection. Financial/government identifiers (credit card,
