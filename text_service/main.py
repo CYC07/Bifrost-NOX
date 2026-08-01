@@ -16,6 +16,7 @@ from common.utils import setup_logging
 from ml.waf.predictor import WAFClassifier
 from ml.sensitive.predictor import SensitiveClassifier
 from ml.secrets.detector import detect as detect_secrets
+from ml.router.predictor import RouterClassifier
 
 setup_logging("text_service")
 logger = logging.getLogger("text_service")
@@ -29,10 +30,25 @@ WAF_ATTACK_THRESHOLD = float(os.getenv("WAF_ATTACK_THRESHOLD", "0.8"))
 presidio_analyzer = None
 waf_classifier = None
 sensitive_classifier = None
+router_classifier = None
 
 async def load_models():
-    global presidio_analyzer, waf_classifier, sensitive_classifier
+    global presidio_analyzer, waf_classifier, sensitive_classifier, router_classifier
     logger.info("Loading NLP Models...")
+
+    # Content-shape router — cheap (TF-IDF+LogReg, no GPU), decides which of
+    # the expensive analyzers below actually need to run on a given text
+    # blob. Loaded first since everything after it is conditional on it.
+    try:
+        router_classifier = RouterClassifier()
+        if router_classifier.load():
+            logger.info("Content-shape router loaded.")
+        else:
+            logger.error("Router failed to load — every request treated as web_request (safe default).")
+            router_classifier = None
+    except Exception as e:
+        logger.error(f"Failed to load router: {e}")
+        router_classifier = None
     try:
         presidio_analyzer = AnalyzerEngine()
         logger.info("Presidio PII analyzer loaded.")
@@ -149,18 +165,38 @@ def model_web_attack(text):
         logger.error(f"WAF Error: {e}")
         return AnalysisResult(module="web_attack", score=0.0, findings=[])
 
+def _route(text: str) -> str:
+    if not router_classifier:
+        return "web_request"  # safe default: still runs WAF, won't miss injection payloads
+    return router_classifier.route(text).route
+
+
 async def analyze_text(request: Request):
     try:
         body = await request.json()
     except:
         return JSONResponse({"detail": "Invalid JSON"}, status_code=400)
-        
+
     text = body.get("text", "")
     metadata = body.get("metadata", {})
-    
+
     logger.info(f"Analyzing text length: {len(text)}")
-    
-    results = [model_sensitive(text), model_code_analysis(text), model_patterns(text), model_web_attack(text)]
+
+    # Secrets + PII always run — cheap (regex/non-transformer), and credential
+    # leaks are too high-stakes to make conditional on the router's guess.
+    # sensitive-content and web_attack are the expensive (transformer) calls
+    # the router exists to gate: a query string is never "a confidential
+    # document", prose is never an HTTP attack payload, and pasted code's
+    # real risk is embedded secrets (already covered unconditionally) — so
+    # at most one of the two expensive analyzers runs per request instead of
+    # both, every time.
+    route = _route(text)
+    results = [model_code_analysis(text), model_patterns(text)]
+    if route == "web_request":
+        results.append(model_web_attack(text))
+    elif route == "prose":
+        results.append(model_sensitive(text))
+    # route == "code": secrets + PII already cover the real risk, skip both.
 
     findings = []
     detailed_scores = {}
@@ -187,7 +223,7 @@ async def analyze_text(request: Request):
         status=status,
         risk_level=risk,
         reason=reason,
-        detailed_findings={"findings": findings, "scores": detailed_scores}
+        detailed_findings={"findings": findings, "scores": detailed_scores, "route": route}
     )
     
     return JSONResponse(dataclasses.asdict(verdict))

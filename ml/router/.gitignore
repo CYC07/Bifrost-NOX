@@ -1,0 +1,3 @@
+# Regenerable — rebuild with `python -m ml.router.build_dataset` / `train`
+artifacts/
+data/
