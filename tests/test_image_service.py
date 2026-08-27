@@ -238,3 +238,22 @@ def test_analyze_blocks_secret_in_gif_frame2():
         )
     assert resp.status_code == 200
     assert resp.json()["status"] == "block"
+
+
+# --- Task 6: preprocessing -------------------------------------------------
+
+from ml.image import preprocess  # noqa: E402
+
+
+def test_for_ocr_upscales_small_and_grayscales():
+    img = Image.open(io.BytesIO(synth_cases.SYNTH_CASES["secret_screenshot"])).convert("RGB")
+    out = preprocess.for_ocr(img)
+    assert out.mode == "L"
+    assert max(out.size) >= max(img.size)
+
+
+def test_crops_includes_whole_and_tiles():
+    img = Image.open(io.BytesIO(synth_cases.SYNTH_CASES["benign_gradient"])).convert("RGB")
+    cs = preprocess.crops(img)
+    assert len(cs) == 6
+    assert cs[0].size == img.size  # first is the whole image

@@ -13,13 +13,19 @@ Task 3 (this file's first form) preserves the original argmax decision exactly:
 Task 4 replaces the argmax/softmax path with multi-label sigmoid.
 """
 import logging
+import os
 
 import torch
 
 from common.schemas import AnalysisResult, RiskLevel
-from ml.image import clip_labels
+from ml.image import clip_labels, preprocess
 
 logger = logging.getLogger("image_service")
+
+# Multi-crop max-pooling raises every group score monotonically, so it would
+# invalidate the single-view cutoffs in clip_labels.GROUP_CUTOFF. Kept OFF until
+# recalibrated against a real labelled image set.
+MULTICROP = os.getenv("IMAGE_CLIP_MULTICROP", "").lower() in ("1", "true", "yes")
 
 
 class ClipClassifier:
@@ -66,13 +72,24 @@ class ClipClassifier:
                 best[g] = (float(pr), label)
         return best
 
+    def _best_over_views(self, image):
+        """Per-group best (score, label) over one or several crops (max-pool).
+        Single whole-image view unless IMAGE_CLIP_MULTICROP is enabled."""
+        views = preprocess.crops(image) if MULTICROP else [image]
+        merged = {"pii_nsfw": (0.0, None), "sensitive": (0.0, None), "benign": (0.0, None)}
+        for view in views:
+            probs = self._image_logits(view).softmax(dim=-1).detach().numpy()
+            best = self._group_scores(probs)
+            for g, (s, lbl) in best.items():
+                if s > merged[g][0]:
+                    merged[g] = (s, lbl)
+        return merged
+
     def classify(self, image) -> AnalysisResult:
         if self.model is None or self.processor is None:
             return AnalysisResult(module="semantic_clip", score=0.0, findings=["Model not loaded"])
         try:
-            logits = self._image_logits(image)
-            probs = logits.softmax(dim=-1).detach().numpy()
-            best = self._group_scores(probs)
+            best = self._best_over_views(image)
             group_scores = {g: round(v[0], 4) for g, v in best.items()}
 
             findings = []
