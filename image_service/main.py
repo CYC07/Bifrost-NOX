@@ -24,6 +24,7 @@ from common.schemas import VerdictStatus, AggregatedVerdict, RiskLevel, Analysis
 from common.utils import setup_logging
 from presidio_analyzer import AnalyzerEngine
 from ml.image import ocr_scan
+from ml.image.clip_classifier import ClipClassifier
 
 setup_logging("image_service")
 logger = logging.getLogger("image_service")
@@ -38,100 +39,21 @@ clip_model = None
 clip_processor = None
 yolo_model = None
 presidio_analyzer = None
+_clip_classifier = None
 
-SEMANTIC_LABELS = [
-    # --- Sensitive content (original) ---
-    "proprietary source code screenshot with api keys",
-    "internal financial spreadsheet with sensitive data",
-    "server network diagram with ip addresses",
-    "official id card passport document",
-    "pakistani cnic national identity card",
-    "smart identity card with chip",
-    "nsfw nude explicit sexual content",
-    "pornography and adult content",
-    "bikini lingerie or semi-nude person",
-    "architectural blueprint of secure facility",
+# Bound concurrent CLIP forwards so N parallel images don't exhaust the
+# laptop's RAM (each forward holds the model + activations).
+_CLIP_SEM = asyncio.Semaphore(int(os.getenv("IMAGE_MAX_CONCURRENCY", "2")))
 
-    # --- Generic logo / branding detection ---
-    "corporate logo or brand watermark on an image",
-    "company logo prominently displayed on a document",
-    "brand logo on product packaging or advertisement",
-    "generic business trademark or registered brand mark",
-    "sports team or athletic brand logo",
-    "luxury fashion brand logo",
 
-    # --- Phishing / brand impersonation login pages ---
-    "microsoft office 365 or outlook login page with logo",
-    "google or gmail account sign in page with logo",
-    "apple id icloud sign in page with logo",
-    "paypal payment or login page with logo",
-    "amazon account sign in page with logo",
-    "facebook or meta login page with logo",
-    "instagram login page with logo",
-    "linkedin login page with logo",
-    "netflix or streaming service login with logo",
-    "dropbox or cloud storage login page with logo",
-    "whatsapp or telegram login page with logo",
+def _get_clip_classifier():
+    return _clip_classifier
 
-    # --- Banking / financial logos ---
-    "bank login page with financial institution logo",
-    "visa mastercard or credit card company logo",
-    "major bank logo like hsbc chase citi bank of america",
-    "cryptocurrency exchange logo like binance coinbase kraken",
-    "digital wallet or payment app logo",
 
-    # --- Government / official emblems ---
-    "government official seal or national emblem",
-    "police law enforcement or military badge logo",
-    "tax authority or revenue department logo",
+def _init_clip_classifier(model, processor):
+    global _clip_classifier
+    _clip_classifier = ClipClassifier(model, processor)
 
-    # --- Corporate / DLP relevant ---
-    "internal corporate document with company logo header",
-    "employee id badge with company logo",
-    "corporate presentation slide with company branding",
-    "confidential report watermarked with company logo",
-
-    # --- Benign / baseline ---
-    "standard photo of nature or animals",
-    "public website screenshot without branding",
-    "generic bar chart or graph",
-    "plain photograph with no logos or branding",
-]
-
-SENSITIVE_LABELS = [
-    # Original sensitive content
-    "proprietary source code screenshot with api keys",
-    "internal financial spreadsheet with sensitive data",
-    "server network diagram with ip addresses",
-    "official id card passport document",
-    "pakistani cnic national identity card",
-    "smart identity card with chip",
-    "nsfw nude explicit sexual content",
-    "pornography and adult content",
-    "bikini lingerie or semi-nude person",
-    "architectural blueprint of secure facility",
-
-    # Phishing / brand impersonation (high risk)
-    "microsoft office 365 or outlook login page with logo",
-    "google or gmail account sign in page with logo",
-    "apple id icloud sign in page with logo",
-    "paypal payment or login page with logo",
-    "amazon account sign in page with logo",
-    "facebook or meta login page with logo",
-    "instagram login page with logo",
-    "linkedin login page with logo",
-    "netflix or streaming service login with logo",
-    "dropbox or cloud storage login page with logo",
-    "whatsapp or telegram login page with logo",
-    "bank login page with financial institution logo",
-    "cryptocurrency exchange logo like binance coinbase kraken",
-
-    # Corporate DLP
-    "internal corporate document with company logo header",
-    "employee id badge with company logo",
-    "corporate presentation slide with company branding",
-    "confidential report watermarked with company logo",
-]
 
 async def load_models():
     global clip_model, clip_processor, yolo_model, presidio_analyzer
@@ -146,6 +68,7 @@ async def load_models():
     try:
         clip_model = CLIPModel.from_pretrained(CLIP_MODEL_ID)
         clip_processor = CLIPProcessor.from_pretrained(CLIP_MODEL_ID)
+        _init_clip_classifier(clip_model, clip_processor)
         logger.info("Semantic Model Loaded Successfully.")
     except Exception as e:
         logger.error(f"Failed to load CLIP model: {e}")
@@ -168,36 +91,6 @@ def model_ocr(image: Image.Image):
     except Exception as e:
         logger.error(f"OCR Error: {e}")
         return AnalysisResult(module="ocr", score=0.0, findings=[f"OCR Error: {str(e)}"])
-
-def model_semantic_clip(image: Image.Image, ocr_result: AnalysisResult):
-    if not clip_model or not clip_processor:
-        return AnalysisResult(module="semantic_clip", score=0.0, findings=["Model not loaded"])
-    try:
-        inputs = clip_processor(text=SEMANTIC_LABELS, images=image, return_tensors="pt", padding=True)
-        outputs = clip_model(**inputs)
-        probs = outputs.logits_per_image.softmax(dim=1).detach().numpy()[0]
-        best_idx = probs.argmax()
-        best_label = SEMANTIC_LABELS[best_idx]
-        best_score = float(probs[best_idx])
-        findings = [f"Classified as: {best_label} ({best_score:.2f})"]
-        risk_score = 0.0
-        logger.info(f"CLIP: {best_label} score={best_score}")
-        is_pii = ("passport" in best_label or "id card" in best_label or "cnic" in best_label or "identity" in best_label or "nsfw" in best_label or "porn" in best_label or "nude" in best_label or "lingerie" in best_label)
-        if is_pii and best_score > 0.4:
-             risk_score = 0.95
-             findings.append(f"CRITICAL: PII/NSFW Detected '{best_label}' (Strict Block)")
-        elif best_label in SENSITIVE_LABELS and best_score > 0.6:
-            has_sensitive_text = ocr_result.score > 0.5
-            if has_sensitive_text:
-                risk_score = 0.9 
-                findings.append(f"CRITICAL: Sensitive Visual '{best_label}' + Sensitive Text Match")
-            else:
-                risk_score = 0.5 
-                findings.append(f"WARNING: Sensitive Visual '{best_label}' detected (No text confirmation)")
-        return AnalysisResult(module="semantic_clip", score=risk_score, findings=findings, raw_data={"top_label": best_label, "confidence": best_score})
-    except Exception as e:
-        logger.error(f"CLIP Error: {e}")
-        return AnalysisResult(module="semantic_clip", score=0.0, findings=[f"CLIP Error: {str(e)}"])
 
 def model_object_detection(image: Image.Image):
     if not yolo_model:
@@ -261,7 +154,11 @@ async def analyze_image(request: Request):
     future_stego = asyncio.to_thread(model_stego, contents)
 
     r_ocr, r_obj, r_stego = await asyncio.gather(future_ocr, future_obj, future_stego)
-    r_clip = await asyncio.to_thread(model_semantic_clip, image, r_ocr)
+    if _clip_classifier is not None:
+        async with _CLIP_SEM:
+            r_clip = await asyncio.to_thread(_clip_classifier.classify, image.convert("RGB"))
+    else:
+        r_clip = AnalysisResult(module="semantic_clip", score=0.0, findings=["Model not loaded"])
     
     results = [r_ocr, r_clip, r_obj, r_stego]
     
