@@ -95,3 +95,22 @@ def test_analyze_allows_benign_gradient():
         )
     assert resp.status_code == 200
     assert resp.json()["status"] == "allow"
+
+
+# --- Task 3: CLIP classifier with cached embeddings ------------------------
+
+def test_clip_classifier_caches_text_embeddings():
+    from image_service.main import _get_clip_classifier
+    clf = _get_clip_classifier()
+    assert clf is not None
+    assert clf.text_embeds is not None
+    assert clf.text_embeds.shape[0] == len(clf.labels)
+
+
+def test_clip_classify_returns_result_for_benign():
+    from image_service.main import _get_clip_classifier
+    clf = _get_clip_classifier()
+    img = Image.open(io.BytesIO(synth_cases.SYNTH_CASES["benign_gradient"])).convert("RGB")
+    r = clf.classify(img)
+    assert r.module == "semantic_clip"
+    assert r.blocked is False
