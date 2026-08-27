@@ -171,17 +171,19 @@ async def analyze_image(request: Request):
     else:
         r_clip = AnalysisResult(module="semantic_clip", score=0.0, findings=["Model not loaded"])
 
-    # Sensitive-visual + sensitive-OCR-text cross-check: a DLP-relevant visual
+    # Sensitive-visual + real-secret/PII cross-check: a DLP-relevant visual
     # (source code, financial sheet, phishing page) is advisory alone, but when
-    # OCR also flags sensitive text on the same image the combination escalates
-    # to a block. This is the original model_semantic_clip intent, moved here so
-    # the CLIP and OCR signals combine in one place.
-    if ("sensitive" in r_clip.raw_data.get("groups_fired", []) if r_clip.raw_data else False) and \
-            (r_ocr.blocked or r_ocr.score >= 0.4):
+    # OCR also finds an ACTUAL secret or financial/gov PII on the same image the
+    # combination is unambiguous. Escalation keys off r_ocr.blocked (a real
+    # detected secret/PII), NOT the advisory keyword score — a bare keyword like
+    # "password" or "q4" substring-matching in a benign code screenshot must not
+    # turn a high-scoring "source code screenshot" visual into a block. (When
+    # OCR blocks the verdict is already BLOCK anyway; the escalation exists to
+    # raise the risk level and record the visual+text correlation.)
+    if r_clip.raw_data and "sensitive" in r_clip.raw_data.get("groups_fired", []) and r_ocr.blocked:
         r_clip = dataclasses.replace(
-            r_clip, blocked=True,
-            risk=r_ocr.risk if r_ocr.blocked else RiskLevel.HIGH,
-            findings=r_clip.findings + ["ESCALATED: sensitive visual + sensitive OCR text"],
+            r_clip, blocked=True, risk=r_ocr.risk,
+            findings=r_clip.findings + ["ESCALATED: sensitive visual + real secret/PII in OCR text"],
         )
 
     results = [r_safety, r_ocr, r_clip, r_obj, r_stego]
@@ -202,8 +204,12 @@ async def analyze_image(request: Request):
         risk = max((r.risk for r in blocked_results), key=list(RiskLevel).index)
         reason = "Blocked by: " + ", ".join(sorted({r.module for r in blocked_results}))
     else:
+        # Match text_service + the original image contract: an ALLOW verdict is
+        # SAFE. Advisory non-blocking findings (EXIF GPS, stego signal) are kept
+        # in detailed_findings but do not raise the top-level risk_level, which
+        # downstream (orchestrator/dashboard) reads as the block severity.
         status = VerdictStatus.ALLOW
-        risk = max((r.risk for r in results), key=list(RiskLevel).index)
+        risk = RiskLevel.SAFE
         reason = "No analyzer flagged a block"
 
     verdict = AggregatedVerdict(

@@ -51,21 +51,48 @@ def _sniff(data: bytes):
     return None
 
 
-def _has_trailing_bytes(data: bytes, fmt: str) -> bool:
-    """True if bytes exist past the format's real end-of-stream marker."""
+# Executable / archive / script magics that should never ride in an image's
+# trailing bytes. Real files routinely carry BENIGN trailing bytes (camera
+# padding, Android Motion Photo appending an MP4, scanner block padding), so
+# "any trailing byte" over-blocks. We require an actual payload signature —
+# higher precision for the same polyglot threat.
+_PAYLOAD_MAGICS = (
+    b"PK\x03\x04",   # ZIP / JAR / APK / Office
+    b"PK\x05\x06",   # empty ZIP
+    b"Rar!\x1a\x07", # RAR
+    b"7z\xbc\xaf\x27\x1c",  # 7z
+    b"MZ",           # PE / DOS executable
+    b"\x7fELF",      # ELF executable
+    b"<?php",        # PHP webshell
+    b"<%",           # ASP/JSP
+    b"#!",           # shell/script shebang
+    b"\x1f\x8b",     # gzip
+)
+
+
+def _trailing_payload(data: bytes, fmt: str) -> bytes | None:
+    """Return the payload magic if data past the image's real end-of-stream
+    marker begins with (or contains near its start) a known payload signature."""
     if fmt == "png":
         idx = data.rfind(b"IEND")
         if idx == -1:
-            return False
-        end = idx + 4 + 4  # 'IEND' + 4-byte CRC
-        return len(data) > end
-    if fmt == "jpeg":
+            return None
+        tail = data[idx + 8:]  # 'IEND' + 4-byte CRC
+    elif fmt == "jpeg":
         idx = data.rfind(b"\xff\xd9")  # EOI
         if idx == -1:
-            return False
-        return len(data) > idx + 2
-    # GIF trailer (0x3B) and container formats carry length in-header; skip.
-    return False
+            return None
+        tail = data[idx + 2:]
+    else:
+        # GIF trailer (0x3B) and container formats carry length in-header; skip.
+        return None
+    if not tail.strip(b"\x00\r\n\t "):
+        return None  # only benign padding
+    for magic in _PAYLOAD_MAGICS:
+        # Check the very start and a short window (skip a few pad bytes).
+        if tail[:64].lstrip(b"\x00\r\n\t ").startswith(magic) or magic in tail[:8]:
+            return magic
+    return None
 
 
 def check_bytes(data: bytes) -> AnalysisResult:
@@ -83,10 +110,11 @@ def check_bytes(data: bytes) -> AnalysisResult:
                 blocked=True, risk=RiskLevel.HIGH,
             )
 
-        if _has_trailing_bytes(data, fmt):
+        payload = _trailing_payload(data, fmt)
+        if payload is not None:
             return AnalysisResult(
                 module="file_safety", score=1.0,
-                findings=[f"Polyglot: {len(data)} bytes with data appended past {fmt.upper()} end-of-stream"],
+                findings=[f"Polyglot: {payload!r} payload appended past {fmt.upper()} end-of-stream"],
                 blocked=True, risk=RiskLevel.HIGH,
             )
 
