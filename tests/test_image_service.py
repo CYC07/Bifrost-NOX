@@ -114,3 +114,37 @@ def test_clip_classify_returns_result_for_benign():
     r = clf.classify(img)
     assert r.module == "semantic_clip"
     assert r.blocked is False
+
+
+# --- Task 4: multi-label CLIP with per-group max-softmax-prob --------------
+
+def test_clip_multilabel_reports_all_group_scores():
+    from image_service.main import _get_clip_classifier
+    clf = _get_clip_classifier()
+    img = Image.open(io.BytesIO(synth_cases.SYNTH_CASES["benign_gradient"])).convert("RGB")
+    r = clf.classify(img)
+    gs = r.raw_data["group_scores"]
+    assert set(gs) >= {"pii_nsfw", "sensitive", "benign"}
+    assert all(0.0 <= v <= 1.0 for v in gs.values())
+
+
+def test_clip_benign_fires_nothing_blocking():
+    from image_service.main import _get_clip_classifier
+    clf = _get_clip_classifier()
+    for name in ("benign_gradient", "business_doc", "exif_gps"):
+        img = Image.open(io.BytesIO(synth_cases.SYNTH_CASES[name])).convert("RGB")
+        r = clf.classify(img)
+        # benign images must not trip the strict pii/nsfw visual block
+        assert r.blocked is False, name
+        assert r.raw_data["group_scores"]["pii_nsfw"] < 0.4, name
+
+
+def test_clip_multilabel_can_fire_multiple_groups():
+    # A source-code screenshot fires the sensitive group; the API surfaces a
+    # list of fired groups rather than a single argmax label.
+    from image_service.main import _get_clip_classifier
+    clf = _get_clip_classifier()
+    img = Image.open(io.BytesIO(synth_cases.SYNTH_CASES["secret_screenshot"])).convert("RGB")
+    r = clf.classify(img)
+    assert "groups_fired" in r.raw_data
+    assert "sensitive" in r.raw_data["groups_fired"]

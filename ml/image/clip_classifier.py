@@ -51,39 +51,67 @@ class ClipClassifier:
             logits = logit_scale * img_feats @ self.text_embeds.t()
         return logits[0]
 
+    def _group_scores(self, probs):
+        """Per-group score = max softmax prob among that group's labels, plus
+        the winning label per group. Raw cosine similarities do NOT calibrate
+        across groups for CLIP ViT-B/32 (they cluster in 0.20-0.30 regardless);
+        the discriminative signal lives in the softmax's relative ranking, so
+        the per-group MAX of the softmax distribution is the calibratable
+        quantity — and unlike a single argmax it lets several groups fire at
+        once (an image can be an ID card AND explicit AND a logo)."""
+        best = {"pii_nsfw": (0.0, None), "sensitive": (0.0, None), "benign": (0.0, None)}
+        for label, pr in zip(self.labels, probs):
+            g = clip_labels.LABEL_GROUP[label]
+            if float(pr) > best[g][0]:
+                best[g] = (float(pr), label)
+        return best
+
     def classify(self, image) -> AnalysisResult:
         if self.model is None or self.processor is None:
             return AnalysisResult(module="semantic_clip", score=0.0, findings=["Model not loaded"])
         try:
             logits = self._image_logits(image)
             probs = logits.softmax(dim=-1).detach().numpy()
-            best_idx = int(probs.argmax())
-            best_label = self.labels[best_idx]
-            best_score = float(probs[best_idx])
-            group = clip_labels.LABEL_GROUP[best_label]
-            findings = [f"Classified as: {best_label} ({best_score:.2f})"]
-            logger.info(f"CLIP: {best_label} score={best_score} group={group}")
+            best = self._group_scores(probs)
+            group_scores = {g: round(v[0], 4) for g, v in best.items()}
 
+            findings = []
+            groups_fired = []
             blocked = False
             risk = RiskLevel.SAFE
             score = 0.0
-            if group == "pii_nsfw" and best_score > clip_labels.GROUP_CUTOFF["pii_nsfw"]:
+
+            pii_score, pii_label = best["pii_nsfw"]
+            sens_score, sens_label = best["sensitive"]
+
+            # Identity/NSFW visuals block on their own (multi-label: evaluated
+            # independently, not gated by being the single argmax winner).
+            if pii_score > clip_labels.GROUP_CUTOFF["pii_nsfw"]:
+                groups_fired.append("pii_nsfw")
                 blocked = True
                 risk = RiskLevel.CRITICAL
-                score = 0.95
-                findings.append(f"CRITICAL: PII/NSFW visual '{best_label}' (strict block)")
-            elif group == "sensitive" and best_score > clip_labels.GROUP_CUTOFF["sensitive"]:
-                # Advisory only — aggregation decides whether the OCR text signal
-                # escalates this to a block.
-                risk = RiskLevel.MEDIUM
-                score = 0.5
-                findings.append(f"WARNING: sensitive visual '{best_label}' (advisory)")
+                score = max(score, float(pii_score))
+                findings.append(f"CRITICAL: PII/NSFW visual '{pii_label}' ({pii_score:.2f}, strict block)")
 
+            # Sensitive/DLP visuals are advisory alone; aggregation escalates
+            # them to a block when OCR also flags sensitive text.
+            if sens_score > clip_labels.GROUP_CUTOFF["sensitive"]:
+                groups_fired.append("sensitive")
+                if risk == RiskLevel.SAFE:
+                    risk = RiskLevel.MEDIUM
+                score = max(score, 0.5)
+                findings.append(f"WARNING: sensitive visual '{sens_label}' ({sens_score:.2f}, advisory)")
+
+            if not findings:
+                top_g = max(best, key=lambda g: best[g][0])
+                findings.append(f"Classified as: {best[top_g][1]} ({best[top_g][0]:.2f})")
+
+            logger.info(f"CLIP groups={group_scores} fired={groups_fired}")
             return AnalysisResult(
                 module="semantic_clip",
                 score=score,
                 findings=findings,
-                raw_data={"top_label": best_label, "confidence": best_score, "group": group},
+                raw_data={"group_scores": group_scores, "groups_fired": groups_fired},
                 blocked=blocked,
                 risk=risk,
             )
