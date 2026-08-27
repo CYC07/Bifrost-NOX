@@ -171,6 +171,28 @@ def test_file_safety_flags_exif_gps_nonblocking():
     assert any("gps" in f.lower() for f in r.findings)
 
 
+def test_file_safety_allows_benign_jpeg_trailing_bytes():
+    # Real JPEGs routinely carry benign trailing bytes (camera padding, Motion
+    # Photo, scanner padding). Only a payload magic in the tail blocks.
+    import io as _io
+    from PIL import Image as _Image
+    buf = _io.BytesIO()
+    _Image.new("RGB", (32, 32), "orange").save(buf, format="JPEG")
+    benign = buf.getvalue() + b"\x00\x00trailing camera metadata padding\x00"
+    r = file_safety.check_bytes(benign)
+    assert r.blocked is False
+
+
+def test_file_safety_blocks_jpeg_with_appended_zip():
+    import io as _io
+    from PIL import Image as _Image
+    buf = _io.BytesIO()
+    _Image.new("RGB", (32, 32), "teal").save(buf, format="JPEG")
+    poly = buf.getvalue() + b"PK\x03\x04payloaddata"
+    r = file_safety.check_bytes(poly)
+    assert r.blocked is True
+
+
 def test_file_safety_rejects_svg():
     svg = b'<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'
     r = file_safety.check_bytes(svg)
@@ -182,10 +204,15 @@ def test_file_safety_blocks_empty():
     assert r.blocked is True
 
 
-def test_stego_clean_image_does_not_block():
+def test_stego_never_blocks_and_is_quiet_by_default():
+    # Advisory telemetry only: never blocks, and emits no alarming finding in
+    # the default (non-strict) mode — not even on a smooth gradient whose LSB
+    # pairs are degenerate. It still records the chi/dof telemetry value.
     img = Image.open(io.BytesIO(synth_cases.SYNTH_CASES["benign_gradient"])).convert("RGB")
     r = stego.chi_square_lsb(img)
     assert r.blocked is False
+    assert r.findings == []
+    assert "chi_over_dof" in r.raw_data
 
 
 def test_analyze_blocks_trailing_zip_end_to_end():
