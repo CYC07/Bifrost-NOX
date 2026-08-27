@@ -119,11 +119,21 @@ def _group_for(label: str) -> str:
 
 LABEL_GROUP = {label: _group_for(label) for label in SEMANTIC_LABELS}
 
-# Original argmax thresholds preserved for Task 3's behaviour-preserving refactor.
-# Task 4 recalibrates these for the sigmoid multi-label path (benign never
-# blocks, so its cutoff is effectively unused / 1.0).
+# Cutoffs apply to the per-group MAX softmax probability (see
+# ClipClassifier._group_scores for why max-softmax-prob, not raw-cosine sigmoid).
+# These preserve the original argmax thresholds (pii>0.4, sensitive>0.6) while
+# enabling multi-label firing.
+#
+# Measured on the synthetic corpus (2026-08-27), per-group max softmax prob:
+#   benign_gradient  pii 0.02  sensitive 0.09   business_doc pii 0.01 sens 0.13
+#   exif_gps         pii 0.06  sensitive 0.05   -> benign images stay well under
+#   secret_screenshot sensitive 0.96 (true source-code screenshot) -> fires
+# CAVEAT: no real ID-card / NSFW / phishing-page images were available to
+# calibrate the pii_nsfw / sensitive TRUE-POSITIVE side — cutoffs are set from
+# the benign false-positive margin only. A real labeled visual set is the
+# follow-up (same "needs real data" honesty as the WAF clean-corpus arc).
 GROUP_CUTOFF = {
     "pii_nsfw": 0.4,
     "sensitive": 0.6,
-    "benign": 1.0,
+    "benign": 1.0,  # benign never blocks; cutoff unused
 }
