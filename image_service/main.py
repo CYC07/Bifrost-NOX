@@ -22,6 +22,8 @@ from contextlib import asynccontextmanager
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from common.schemas import VerdictStatus, AggregatedVerdict, RiskLevel, AnalysisResult
 from common.utils import setup_logging
+from presidio_analyzer import AnalyzerEngine
+from ml.image import ocr_scan
 
 setup_logging("image_service")
 logger = logging.getLogger("image_service")
@@ -35,6 +37,7 @@ CLIP_MODEL_ID = "openai/clip-vit-base-patch32"
 clip_model = None
 clip_processor = None
 yolo_model = None
+presidio_analyzer = None
 
 SEMANTIC_LABELS = [
     # --- Sensitive content (original) ---
@@ -131,7 +134,14 @@ SENSITIVE_LABELS = [
 ]
 
 async def load_models():
-    global clip_model, clip_processor, yolo_model
+    global clip_model, clip_processor, yolo_model, presidio_analyzer
+    logger.info("Loading Presidio PII engine...")
+    try:
+        presidio_analyzer = AnalyzerEngine()
+        logger.info("Presidio Loaded.")
+    except Exception as e:
+        logger.error(f"Failed to load Presidio: {e}")
+
     logger.info(f"Loading Semantic Model: {CLIP_MODEL_ID}...")
     try:
         clip_model = CLIPModel.from_pretrained(CLIP_MODEL_ID)
@@ -149,17 +159,12 @@ async def load_models():
 
 # --- MODEL LOGIC (UNCHANGED) ---
 def model_ocr(image: Image.Image):
+    """OCR the image, then run the extracted text through the firewall's real
+    text detectors (secrets + PII + SSN-fallback + keywords) via ml.image.ocr_scan
+    — replaces the old 12-keyword substring match."""
     try:
         text = pytesseract.image_to_string(image)
-        text_lower = text.lower()
-        findings = []
-        score = 0.0
-        sensitive_keywords = ["confidential", "secret", "password", "private key", "internal use only", "revenue", "q1", "q2", "q3", "q4", "budget", "ssn"]
-        for keyword in sensitive_keywords:
-            if keyword in text_lower:
-                findings.append(f"Sensitive keyword detected: {keyword}")
-                score = max(score, 0.9)
-        return AnalysisResult(module="ocr", score=score, findings=findings, raw_data={"extracted_text": text[:500]})
+        return ocr_scan.scan_ocr_text(text, presidio_analyzer)
     except Exception as e:
         logger.error(f"OCR Error: {e}")
         return AnalysisResult(module="ocr", score=0.0, findings=[f"OCR Error: {str(e)}"])
