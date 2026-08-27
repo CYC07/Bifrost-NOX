@@ -7,12 +7,11 @@ import uvicorn
 import sys
 import os
 import logging
-from PIL import Image
+from PIL import Image, ImageSequence
 import io
 import pytesseract
 import torch
 from transformers import CLIPProcessor, CLIPModel
-import numpy as np
 from ultralytics import YOLO
 import asyncio
 import dataclasses
@@ -23,7 +22,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from common.schemas import VerdictStatus, AggregatedVerdict, RiskLevel, AnalysisResult
 from common.utils import setup_logging
 from presidio_analyzer import AnalyzerEngine
-from ml.image import ocr_scan
+from ml.image import ocr_scan, file_safety, stego
 from ml.image.clip_classifier import ClipClassifier
 
 setup_logging("image_service")
@@ -81,12 +80,27 @@ async def load_models():
         logger.error(f"Failed to load YOLO: {e}")
 
 # --- MODEL LOGIC (UNCHANGED) ---
+OCR_MAX_FRAMES = int(os.getenv("IMAGE_OCR_MAX_FRAMES", "8"))
+
+
 def model_ocr(image: Image.Image):
     """OCR the image, then run the extracted text through the firewall's real
     text detectors (secrets + PII + SSN-fallback + keywords) via ml.image.ocr_scan
-    — replaces the old 12-keyword substring match."""
+    — replaces the old 12-keyword substring match.
+
+    Animated/multi-page images (GIF/APNG/TIFF) are sampled across frames: a
+    payload hidden in frame 2+ would otherwise bypass frame-1-only OCR."""
     try:
-        text = pytesseract.image_to_string(image)
+        n_frames = getattr(image, "n_frames", 1)
+        if n_frames > 1:
+            texts = []
+            for i, frame in enumerate(ImageSequence.Iterator(image)):
+                if i >= OCR_MAX_FRAMES:
+                    break
+                texts.append(pytesseract.image_to_string(frame.convert("RGB")))
+            text = "\n".join(texts)
+        else:
+            text = pytesseract.image_to_string(image)
         return ocr_scan.scan_ocr_text(text, presidio_analyzer)
     except Exception as e:
         logger.error(f"OCR Error: {e}")
@@ -115,23 +129,6 @@ def model_object_detection(image: Image.Image):
         logger.error(f"YOLO Error: {e}")
         return AnalysisResult(module="object_detection", score=0.0, findings=[f"YOLO Error: {e}"])
 
-def model_stego(image_bytes: bytes):
-    try:
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        img_array = np.array(image)
-        lsb_plane = img_array[:, :, 0] & 1
-        avg_density = np.mean(lsb_plane)
-        distance_from_random = abs(avg_density - 0.5)
-        score = 0.0
-        findings = []
-        if distance_from_random < 0.005: 
-            score = 0.3 
-            findings.append("Suspicious LSB pattern detected (Possible Steganography)")
-        return AnalysisResult(module="stego", score=score, findings=findings)
-    except Exception as e:
-        logger.error(f"Stego Error: {e}")
-        return AnalysisResult(module="stego", score=0.0, findings=[])
-
 # --- HANDLERS ---
 
 async def analyze_image(request: Request):
@@ -142,16 +139,30 @@ async def analyze_image(request: Request):
         return JSONResponse({"error": "No file provided"}, status_code=400)
 
     contents = await file_item.read()
+
+    # File-safety runs FIRST, on raw bytes, before any model decode. A polyglot,
+    # decompression bomb, or rejected format short-circuits to BLOCK — we never
+    # hand crafted-malicious bytes to the model decoders.
+    r_safety = file_safety.check_bytes(contents)
+    if r_safety.blocked:
+        verdict = AggregatedVerdict(
+            status=VerdictStatus.BLOCK,
+            risk_level=r_safety.risk,
+            reason="Blocked by: file_safety",
+            detailed_findings={"findings": r_safety.findings, "scores": {"file_safety": r_safety.score}},
+        )
+        return JSONResponse(dataclasses.asdict(verdict))
+
     try:
         image = Image.open(io.BytesIO(contents))
-    except Exception as e:
+    except Exception:
         return JSONResponse({"detail": "Invalid image file"}, status_code=400)
 
     logger.info(f"Analyzing image: {file_item.filename} ({image.width}x{image.height})")
 
     future_ocr = asyncio.to_thread(model_ocr, image)
     future_obj = asyncio.to_thread(model_object_detection, image)
-    future_stego = asyncio.to_thread(model_stego, contents)
+    future_stego = asyncio.to_thread(stego.chi_square_lsb, image.convert("RGB"))
 
     r_ocr, r_obj, r_stego = await asyncio.gather(future_ocr, future_obj, future_stego)
     if _clip_classifier is not None:
@@ -159,46 +170,49 @@ async def analyze_image(request: Request):
             r_clip = await asyncio.to_thread(_clip_classifier.classify, image.convert("RGB"))
     else:
         r_clip = AnalysisResult(module="semantic_clip", score=0.0, findings=["Model not loaded"])
-    
-    results = [r_ocr, r_clip, r_obj, r_stego]
-    
-    max_score = max(r.score for r in results)
-    weighted_score = (
-        (r_clip.score * 0.4) +
-        (r_ocr.score * 0.3) +
-        (r_stego.score * 0.2) +
-        (r_obj.score * 0.1)
-    )
-    
+
+    # Sensitive-visual + sensitive-OCR-text cross-check: a DLP-relevant visual
+    # (source code, financial sheet, phishing page) is advisory alone, but when
+    # OCR also flags sensitive text on the same image the combination escalates
+    # to a block. This is the original model_semantic_clip intent, moved here so
+    # the CLIP and OCR signals combine in one place.
+    if ("sensitive" in r_clip.raw_data.get("groups_fired", []) if r_clip.raw_data else False) and \
+            (r_ocr.blocked or r_ocr.score >= 0.4):
+        r_clip = dataclasses.replace(
+            r_clip, blocked=True,
+            risk=r_ocr.risk if r_ocr.blocked else RiskLevel.HIGH,
+            findings=r_clip.findings + ["ESCALATED: sensitive visual + sensitive OCR text"],
+        )
+
+    results = [r_safety, r_ocr, r_clip, r_obj, r_stego]
+
     findings = []
     detailed_scores = {}
     for r in results:
         findings.extend(r.findings)
         detailed_scores[r.module] = r.score
-        
-    status = VerdictStatus.ALLOW
-    risk = RiskLevel.SAFE
-    
-    final_score = max(max_score, weighted_score)
-    
-    if max_score > 0.8: 
+
+    # Decision-level aggregation (same as text_service.analyze_text): each
+    # analyzer already made its own calibrated block/allow call; OR them and
+    # report the highest risk among those that fired. No global threshold over
+    # incomparable scores, no dead weighted-score path.
+    blocked_results = [r for r in results if r.blocked]
+    if blocked_results:
         status = VerdictStatus.BLOCK
-        risk = RiskLevel.CRITICAL
-        reason = f"Critical Threat Detected (Score: {max_score})"
-    elif weighted_score > 0.5: 
-        status = VerdictStatus.BLOCK 
-        risk = RiskLevel.MEDIUM
-        reason = f"Combined Risk Threshold Exceeded (Score: {weighted_score:.2f})"
+        risk = max((r.risk for r in blocked_results), key=list(RiskLevel).index)
+        reason = "Blocked by: " + ", ".join(sorted({r.module for r in blocked_results}))
     else:
-        reason = "Safe"
+        status = VerdictStatus.ALLOW
+        risk = max((r.risk for r in results), key=list(RiskLevel).index)
+        reason = "No analyzer flagged a block"
 
     verdict = AggregatedVerdict(
         status=status,
         risk_level=risk,
         reason=reason,
-        detailed_findings={"findings": findings, "scores": detailed_scores}
+        detailed_findings={"findings": findings, "scores": detailed_scores},
     )
-    
+
     return JSONResponse(dataclasses.asdict(verdict))
 
 routes = [
