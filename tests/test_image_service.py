@@ -148,3 +148,66 @@ def test_clip_multilabel_can_fire_multiple_groups():
     r = clf.classify(img)
     assert "groups_fired" in r.raw_data
     assert "sensitive" in r.raw_data["groups_fired"]
+
+
+# --- Task 5: file safety + stego + aggregation -----------------------------
+
+from ml.image import file_safety, stego  # noqa: E402
+
+
+def test_file_safety_blocks_trailing_zip():
+    r = file_safety.check_bytes(synth_cases.SYNTH_CASES["trailing_zip"])
+    assert r.blocked is True
+
+
+def test_file_safety_allows_clean_png():
+    r = file_safety.check_bytes(synth_cases.SYNTH_CASES["benign_gradient"])
+    assert r.blocked is False
+
+
+def test_file_safety_flags_exif_gps_nonblocking():
+    r = file_safety.check_bytes(synth_cases.SYNTH_CASES["exif_gps"])
+    assert r.blocked is False
+    assert any("gps" in f.lower() for f in r.findings)
+
+
+def test_file_safety_rejects_svg():
+    svg = b'<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'
+    r = file_safety.check_bytes(svg)
+    assert r.blocked is True
+
+
+def test_file_safety_blocks_empty():
+    r = file_safety.check_bytes(b"")
+    assert r.blocked is True
+
+
+def test_stego_clean_image_does_not_block():
+    img = Image.open(io.BytesIO(synth_cases.SYNTH_CASES["benign_gradient"])).convert("RGB")
+    r = stego.chi_square_lsb(img)
+    assert r.blocked is False
+
+
+def test_analyze_blocks_trailing_zip_end_to_end():
+    from starlette.testclient import TestClient
+    from image_service.main import app
+    with TestClient(app) as client:
+        resp = client.post(
+            "/analyze",
+            files={"file": ("p.png", synth_cases.SYNTH_CASES["trailing_zip"], "image/png")},
+        )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "block"
+
+
+def test_analyze_blocks_secret_in_gif_frame2():
+    # Multi-frame OCR: a secret hidden in frame 2 of a GIF must not bypass.
+    from starlette.testclient import TestClient
+    from image_service.main import app
+    with TestClient(app) as client:
+        resp = client.post(
+            "/analyze",
+            files={"file": ("a.gif", synth_cases.SYNTH_CASES["gif_payload_frame2"], "image/gif")},
+        )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "block"
