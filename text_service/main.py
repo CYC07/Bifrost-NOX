@@ -8,6 +8,7 @@ import os
 import asyncio
 import hashlib
 import json
+import re
 import logging
 import threading
 import dataclasses
@@ -161,25 +162,52 @@ def model_code_analysis(text, direction="outbound"):
     return AnalysisResult(module="code", score=0.5, findings=findings, risk=RiskLevel.LOW,
                           raw_data={"advisory": True})
 
-def model_patterns(text):
-    """Presidio PII detection. Financial/government identifiers (credit card,
-    SSN, IBAN) block outright — those are never benign in transit. Contact
-    info (phone/email) alone is informational only, not blocking — it's
-    routine in normal traffic (contact forms, headers) and blocking on it
-    would be a firewall that can't pass an email address."""
+PII_MIN_SCORE = float(os.getenv("PII_MIN_SCORE", "0.4"))
+_PII_SENSITIVE = {"CREDIT_CARD", "US_SSN", "IBAN"}
+# A Luhn-valid number scores 1.0 whatever it is (device ids, session ids...), so a card needs
+# card formatting (groups separated by space/dash) or card-ish words just before it.
+_CARD_CONTEXT = re.compile(r"card|credit|debit|visa|master|amex|\bcc\b|cc_|ccnum|cvv|cvc|expir|payment|\bpan\b", re.I)
+_CARD_GROUPED = re.compile(r"\d{4}[ -]\d{4}[ -]\d{4}[ -]\d{1,7}$")
+
+
+def _looks_like_card(text: str, start: int, end: int) -> bool:
+    return bool(_CARD_GROUPED.search(text[start:end].strip()) or _CARD_CONTEXT.search(text[max(0, start - 60):start]))
+
+
+def model_patterns(text, direction="outbound"):
+    """Presidio PII detection, blocking on evidence rather than entity type.
+
+    Found live: a Windows push-service reply and an app login body were blocked as US_SSN
+    although Presidio itself scored them 0.05 (any bare 9-digit id). So: a sensitive entity
+    blocks only at score >= PII_MIN_SCORE (bare 9 digits 0.05; formatted SSN 0.5; with
+    context 0.85), and a credit card additionally needs card formatting or card-ish context.
+    Anything weaker that still matched is reported as advisory. Inbound replies are advisory
+    only (a server's own reply is not exfiltration). Contact info (phone/email) is
+    informational: routine in normal traffic."""
     if not presidio_analyzer:
         return AnalysisResult(module="pattern", score=0.0, findings=["Presidio not loaded"])
     try:
         results = presidio_analyzer.analyze(text=text, entities=["PHONE_NUMBER", "EMAIL_ADDRESS", "IBAN", "CREDIT_CARD", "US_SSN"], language='en')
-        findings = []
-        blocked = False
+        findings: list[str] = []
+        hard = soft = False
         for res in results:
+            if res.entity_type not in _PII_SENSITIVE:
+                findings.append(f"PII Detected: {res.entity_type} ({res.score:.2f})")      # contact info
+                continue
+            if res.score < PII_MIN_SCORE:
+                continue                                  # Presidio itself says "unlikely"
             findings.append(f"PII Detected: {res.entity_type} ({res.score:.2f})")
-            if res.entity_type in ["CREDIT_CARD", "US_SSN", "IBAN"]:
-                blocked = True
-        score = 0.9 if blocked else (0.4 if findings else 0.0)
-        risk = RiskLevel.CRITICAL if blocked else RiskLevel.SAFE
-        return AnalysisResult(module="pattern", score=score, findings=findings, blocked=blocked, risk=risk)
+            card_ok = res.entity_type != "CREDIT_CARD" or _looks_like_card(text, res.start, res.end)
+            if direction == "outbound" and card_ok:
+                hard = True
+            else:
+                soft = True
+        if hard:
+            return AnalysisResult(module="pattern", score=0.9, findings=findings, blocked=True, risk=RiskLevel.CRITICAL)
+        if soft:
+            return AnalysisResult(module="pattern", score=0.4, findings=findings, risk=RiskLevel.LOW,
+                                  raw_data={"advisory": True})
+        return AnalysisResult(module="pattern", score=0.4 if findings else 0.0, findings=findings)
     except Exception as e:
         logger.error(f"Presidio Error: {e}")
         return AnalysisResult(module="pattern", score=0.0, findings=[])
@@ -345,7 +373,7 @@ def _analyze_sync(text: str, in_scope: bool = False, direction: str = "outbound"
     # Outside LLM scope a signature hit is advisory (CENSOR -> dashboard WARN).
     # sensitive-content and web_attack are the only analyzers the router gates.
     route = _route(text)
-    results = [model_code_analysis(text, direction), model_patterns(text), model_pi_signatures(text, in_scope)]
+    results = [model_code_analysis(text, direction), model_patterns(text, direction), model_pi_signatures(text, in_scope)]
     # Expensive analyzers run last and only if nothing has blocked yet: the verdict
     # is an OR of block decisions, so once one has fired, running a slower analyzer
     # can only add findings, not change the outcome.
