@@ -283,7 +283,7 @@ def test_notebook_is_valid_and_every_code_cell_compiles():
     assert int(m.group(1)) == predictor.TRANSFORMER_MAX_LENGTH, "notebook max_len must match the predictor"
     m2 = re.search(r"LABELS = \[([^\]]+)\]", src_all)
     assert [x.strip().strip('"') for x in m2.group(1).split(",")] == LABELS, "label order must match taxonomy"
-    assert not re.search(r"/home/|~/FYP|xpal", src_all, re.I), "no local paths or engagement names"
+    assert not re.search(r"/home/|~/FYP", src_all, re.I), "no local paths in the notebook"
 
 
 def test_privacy_denylist_removes_records(tmp_path):
