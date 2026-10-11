@@ -311,7 +311,7 @@ source venv/bin/activate
 PYTHONPATH=. pytest tests -q
 ```
 
-Current baseline: **575 passed, 4 xfailed, 0 failed**.
+Current baseline: **606 passed, 4 xfailed, 0 failed**.
 
 - **4 xfailed** are known model limitations recorded as tests (two are `strict`, so the suite goes red if they ever start passing): the prompt-injection model flags the real example.com page, and the WAF still flags JSON values containing URLs / apostrophes.
 - **7 failed** are all in `tests/test_image_service.py`: with `transformers>=5`, `CLIPModel.get_text_features()` returns a `ModelOutput` instead of a tensor, so the CLIP classifier fails to load (the service degrades; OCR/stego/file checks still run). The fix is a one-line `getattr(feats, "pooler_output", feats)` in `ml/image/clip_classifier.py`.
@@ -377,6 +377,7 @@ ai_firewall/
 - **Pinned clients** (apps and SDKs that ignore the system CA store) cannot be inspected; they are blocked or allowlisted.
 - **Traffic that never crosses the network** (a local LLM on the same machine) is invisible to a network firewall.
 - **Model false positives remain** in places: the WAF on values containing URLs/apostrophes, and the zero-shot sensitive-content model on some prose (e.g. terms-of-service text). They are tracked as xfail tests or open issues rather than hidden by thresholds.
+- **WAF v2 (in progress):** the shipping WAF model was trained on data where shape predicted the label (every benign JSON body scored `sqli`). `python -m ml.waf.v2.build` builds a shape-balanced, group-split dataset from public PayloadsAllTheThings/SecLists/FuzzDB (plus a privacy denylist via `WAF_V2_DENYLIST`), and `ml/waf/train_v2.ipynb` trains two DistilBERT arms on Colab against explicit ship gates. On 25 independent hand-written probes a quick TF-IDF model trained on the v2 data cut benign false positives from 10/15 to 2/15 and caught 10/10 attacks (v1: 9/10); the DistilBERT arms have **not** been trained or gated yet, so the shipping model is unchanged.
 - **IBAN detection is unverified:** Presidio's IBAN recognizer did not match well-formed test IBANs in our probes, so don't rely on IBAN blocking.
 - **Prompt-injection signatures are a tripwire**, not a defence: paraphrases get through outside LLM scope (recall ≈ 83 % on the bundled eval set, 0 false positives on its benign items).
 - **Long prompts:** only up to 16 windows of 1,500 characters are scored, so an injection in the middle of a very large (>~16 KB) prompt can be missed.
