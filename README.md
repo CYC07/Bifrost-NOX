@@ -69,6 +69,8 @@ This is a gateway people have to be able to use. Every default favours not break
 
 The name alone is never enough, because SNI and `Host` are set by the client. A connection is trusted only if **every name it presents is trusted** (SNI and `Host` must agree, which defeats domain fronting) **and the real destination IP is inside Microsoft's published ranges** (`config/microsoft_ip_ranges.json`, which defeats a spoofed SNI aimed at an attacker's server). Refresh the ranges with `python scripts/update_microsoft_ranges.py`. Known limits: the ranges include Azure address space, which anyone can rent, so spoofing now requires running a VM in Azure rather than setting a header; CDN-fronted Microsoft hosts (Akamai, Cloudflare; about 18 % of destinations in the lab) cannot be verified by IP and get normal inspection; a missing ranges file also means normal inspection. `TRUSTED_VERIFY_IP=0` restores name-only trust.
 
+**Documents and uploads.** PDFs and ZIP-based files (DOCX/XLSX/…) are sent to the document service (YARA, structure, metadata), both as downloads and as **file parts of multipart uploads** (each part is sniffed and routed on its own; the routed bytes are removed before the remaining form fields get text analysis). Files over `DOC_SCAN_MAX_BYTES` (20 MB) are allowed unanalysed. Executables keep the blanket block. The existing document analyzers are not perfectly precise (measured: 1 of 78 real benign files blocked, a Ghostscript manual whose `/JS` prefix + `/OpenAction` trips the `PDF_JavaScript_Launcher` rule), so a document-service BLOCK is **advisory by default** (a warn row in the Uploads feed, nothing blocked); set `DOC_SCAN_MODE=block` to enforce it, or `off` to restore the legacy route. In block mode the live battery (`vm-lab/fw_malware.ps1`: PDF with `/OpenAction`+`/JavaScript`, DOCX with `vbaProject.bin`, EICAR inside a stored ZIP, plus clean controls; HTTP and HTTPS; downloads and uploads) blocks 7/7 malicious and passes 7/7 clean.
+
 **LLM scope.** Prompt injection only matters for text that will reach an instruction-following model. Traffic is treated as LLM traffic when it is outbound **and** the host is in `config/llm_hosts.json`, the path ends in a known LLM API path (`/v1/chat/completions`, `/v1/messages`, …), or the JSON body looks like an LLM call (`model` + `messages`/`prompt`/`input`/`contents`). The list hot-reloads; add your company's internal LLM gateway there.
 
 ---
@@ -224,6 +226,8 @@ All settings are environment variables. `start_all.sh` sources a `.env` in the p
 | `WAF_MODEL_PATH` | `ml/waf/artifacts/waf_distilbert` | joblib file or HF directory |
 | `PROMPT_INJECTION_THRESHOLD` | `0.9` | injection-model block cutoff (LLM traffic only) |
 | `PII_MIN_SCORE` | `0.4` | minimum Presidio confidence for an SSN/IBAN/card match to count |
+| `DOC_SCAN_MODE` | `advisory` | `advisory` (document-service block shown as a warning), `block` (enforce), `off` (legacy route) |
+| `DOC_SCAN_MAX_BYTES` | `20971520` | documents larger than this are allowed unanalysed |
 | `TRUSTED_VERIFY_IP` | `1` | require a trusted-domain connection to land in Microsoft's IP ranges (`0` = name-only) |
 | `SENSITIVE_THRESHOLD` / `SENSITIVE_LABELS` | `0.6` / built-in | zero-shot sensitive-content cutoff / label override |
 | `IMAGE_MAX_CONCURRENCY`, `IMAGE_OCR_MAX_FRAMES`, `IMAGE_CLIP_MULTICROP`, `IMAGE_STEGO_STRICT` | `2`, `8`, off, off | image-service tuning |
@@ -307,7 +311,7 @@ source venv/bin/activate
 PYTHONPATH=. pytest tests -q
 ```
 
-Current baseline: **445 passed, 4 xfailed, 7 failed**.
+Current baseline: **575 passed, 4 xfailed, 0 failed**.
 
 - **4 xfailed** are known model limitations recorded as tests (two are `strict`, so the suite goes red if they ever start passing): the prompt-injection model flags the real example.com page, and the WAF still flags JSON values containing URLs / apostrophes.
 - **7 failed** are all in `tests/test_image_service.py`: with `transformers>=5`, `CLIPModel.get_text_features()` returns a `ModelOutput` instead of a tensor, so the CLIP classifier fails to load (the service degrades; OCR/stego/file checks still run). The fix is a one-line `getattr(feats, "pooler_output", feats)` in `ml/image/clip_classifier.py`.
