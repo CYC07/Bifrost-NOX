@@ -20,9 +20,10 @@ class TransparentProxy:
         self.port = port
         self.inspector = inspector
         self.ca = CertificateAuthority()
-        self.loop = asyncio.get_event_loop()
+        self.loop = None  # set in start(): no running loop exists yet at __init__ time
 
     async def start(self):
+        self.loop = asyncio.get_running_loop()
         server = await asyncio.start_server(
             self.handle_client, self.host, self.port
         )
@@ -289,6 +290,9 @@ class TransparentProxy:
             verdict = await self.inspector.inspect_full(
                 parser.headers, parser.body, direction, is_https,
                 src_ip=src, dst_ip=dst, dst_port=dest_port,
+                host=real_dst,
+                method=(getattr(parser, "method", "") or "") if direction == "outbound" else "",
+                path=(getattr(parser, "path", "") or "") if direction == "outbound" else "",
             )
             if verdict == "block":
                 # Always inform the client, whichever direction tripped.

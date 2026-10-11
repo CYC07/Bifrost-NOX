@@ -114,7 +114,9 @@ class CertificateAuthority:
         ).serial_number(
             x509.random_serial_number()
         ).not_valid_before(
-            datetime.datetime.utcnow()
+            # backdated: a client with a slow clock (VM, fresh device) otherwise
+            # rejects a just-minted leaf as "not yet valid"
+            datetime.datetime.utcnow() - datetime.timedelta(days=1)
         ).not_valid_after(
             datetime.datetime.utcnow() + datetime.timedelta(days=365)
         ).add_extension(

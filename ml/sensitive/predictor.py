@@ -51,12 +51,16 @@ class SensitiveClassifier:
 
     def load(self) -> bool:
         try:
+            import torch
             from transformers import pipeline  # lazy: heavy import
             self._pipe = pipeline(
                 "zero-shot-classification",
                 model=self.model_name,
                 # CPU; -1 device. Truncate long content so a big paste can't OOM.
                 device=-1,
+                # transformers>=5 honours the checkpoint's stored dtype; this one is
+                # fp16, which is ~14x slower than fp32 on CPU (4.3 s vs 0.3 s/request).
+                dtype=torch.float32,
             )
             self._loaded = True
             logger.info("Sensitive model loaded (%s, %d labels)", self.model_name, len(self._labels))
@@ -76,6 +80,9 @@ class SensitiveClassifier:
                 candidate_labels=self._labels,
                 multi_label=True,
                 truncation=True,
+                # one batched forward over all labels instead of one pass per label
+                # (2-4x faster; scores differ by <1e-4)
+                batch_size=len(self._labels),
             )
             scores = {lbl: float(s) for lbl, s in zip(out["labels"], out["scores"])}
             top_label = out["labels"][0]        # pipeline returns sorted desc

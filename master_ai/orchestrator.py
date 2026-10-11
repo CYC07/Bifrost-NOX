@@ -72,6 +72,10 @@ THREAT_PATTERNS: list[tuple[str, str, str, float]] = [
     # (substring, type, severity, confidence)
     ("sql", "SQL Injection", "high", 0.94),
     ("xss", "Cross-Site Scripting", "high", 0.90),
+    ("prompt_injection", "Prompt Injection", "critical", 0.97),
+    ("prompt injection", "Prompt Injection", "critical", 0.97),
+    ("request_target", "Malicious Request Target", "high", 0.92),
+    ("web_attack", "Web Attack", "high", 0.90),
     ("injection", "Command Injection", "critical", 0.98),
     ("malware", "Malware Payload", "critical", 0.96),
     ("eicar", "EICAR Test Signature", "medium", 0.99),
@@ -179,6 +183,25 @@ def _country_guess(ip: str) -> str:
     return buckets[oct1 % len(buckets)]
 
 
+def _service_timeout() -> float:
+    """Per-service call timeout. Kept below the gateway's AI_TIMEOUT (10 s) so the
+    orchestrator answers (or fails explicitly) before the gateway gives up."""
+    return float(os.environ.get("SERVICE_TIMEOUT", "8.0"))
+
+
+def _no_verdict(reason: str, default: AggregatedVerdict) -> AggregatedVerdict:
+    """A service gave no usable verdict. AI_FAIL_MODE=open (default) keeps the allow
+    default; closed blocks. Same policy as the gateway (gateway/proxy.py)."""
+    if os.environ.get("AI_FAIL_MODE", "open").lower() == "closed":
+        return AggregatedVerdict(
+            status=VerdictStatus.BLOCK,
+            risk_level="high",
+            reason=f"AI analysis unavailable (fail-closed): {reason}",
+            detailed_findings={},
+        )
+    return default
+
+
 async def analyze_traffic(request: Request) -> JSONResponse:
     form = await request.form()
     content_type = form.get("content_type")
@@ -190,6 +213,12 @@ async def analyze_traffic(request: Request) -> JSONResponse:
     logger.info(f"Received analysis request: {content_type} from {source_ip}")
 
     port = form.get("port", "")
+    # request context from the gateway (used by analyzers to scope e.g. LLM-only checks)
+    direction = form.get("direction", "")
+    host = form.get("host", "")
+    method = form.get("method", "")
+    path = form.get("path", "")
+    kind = form.get("kind", "")   # "url": text_content is a request target (path+query), not a body
     ctx = {
         "source_ip": source_ip,
         "destination_ip": destination_ip,
@@ -219,16 +248,20 @@ async def analyze_traffic(request: Request) -> JSONResponse:
 
     try:
         t0 = time.monotonic()
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=_service_timeout()) as client:
             if content_type == ContentType.TEXT:
                 resp = await client.post(
                     f"{TEXT_SERVICE_URL}/analyze",
-                    json={"text": text_content, "metadata": {"src": source_ip, "dst": destination_ip}},
+                    json={"text": text_content, "metadata": {
+                        "src": source_ip, "dst": destination_ip,
+                        "direction": direction, "host": host, "method": method, "path": path, "kind": kind,
+                    }},
                 )
                 if resp.status_code == 200:
                     verdict = AggregatedVerdict(**resp.json())
                 else:
                     logger.error(f"Text service error: {resp.text}")
+                    verdict = _no_verdict(f"text service HTTP {resp.status_code}", verdict)
 
             elif content_type == ContentType.IMAGE and file_item:
                 blob = await file_item.read()
@@ -237,6 +270,8 @@ async def analyze_traffic(request: Request) -> JSONResponse:
                 resp = await client.post(f"{IMAGE_SERVICE_URL}/analyze", files=files)
                 if resp.status_code == 200:
                     verdict = AggregatedVerdict(**resp.json())
+                else:
+                    verdict = _no_verdict(f"image service HTTP {resp.status_code}", verdict)
 
             elif content_type == ContentType.DOCUMENT and file_item:
                 blob = await file_item.read()
@@ -245,10 +280,13 @@ async def analyze_traffic(request: Request) -> JSONResponse:
                 resp = await client.post(f"{DOCUMENT_SERVICE_URL}/analyze", files=files)
                 if resp.status_code == 200:
                     verdict = AggregatedVerdict(**resp.json())
+                else:
+                    verdict = _no_verdict(f"document service HTTP {resp.status_code}", verdict)
 
         _RECENT_LATENCIES.append(round((time.monotonic() - t0) * 1000, 1))
     except Exception as exc:
-        logger.error(f"Analysis failed: {exc}")
+        logger.error(f"Analysis failed: {type(exc).__name__}: {exc}")
+        verdict = _no_verdict(f"{type(exc).__name__}: {exc}".rstrip(": "), verdict)
 
     if upload_record is not None:
         status = str(verdict.status).lower()

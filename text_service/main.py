@@ -5,8 +5,13 @@ from starlette.requests import Request
 import uvicorn
 import sys
 import os
+import asyncio
+import hashlib
+import json
 import logging
+import threading
 import dataclasses
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from presidio_analyzer import AnalyzerEngine
 
@@ -18,6 +23,10 @@ from ml.sensitive.predictor import SensitiveClassifier
 from ml.secrets.detector import detect as detect_secrets
 from ml.router.predictor import RouterClassifier
 from ml.prompt_injection.predictor import PromptInjectionClassifier
+from ml.prompt_injection import signatures as pi_signatures
+from ml.prompt_injection.prompts import extract_prompts
+from common import llm_scope
+from ml.waf import target as request_target
 
 setup_logging("text_service")
 logger = logging.getLogger("text_service")
@@ -119,14 +128,24 @@ def model_sensitive(text):
         logger.error(f"Sensitive Error: {e}")
         return AnalysisResult(module="sensitive", score=0.0, findings=[])
 
-def model_code_analysis(text):
+# Credentials that legitimately travel in requests/responses and URLs: JWTs (SSO callbacks, magic
+# links, every login API reply), client-side Google API keys, a generic password=. Reported as
+# advisory, never blocked. Vendor secrets that should never leave the network still block outbound.
+_TOLERATED_SECRETS = {"JWT", "Google API Key", "Generic Secret", "Stripe Test Key"}
+
+
+def model_code_analysis(text, direction="outbound"):
     """Secret detection — deterministic regex (ml/secrets/), kept on purpose
     (precision beats a model here; see ml/secrets/patterns.py). Vendor-specific
     patterns + structural validation (JWT) + known-placeholder exclusion, added
     2026-08-01 to cut false positives beyond the original 4 generic patterns.
     The old eval(/exec(/os.system( substring check was removed separately: it
     was a bare string-contains with no context, and the WAF command_injection
-    class already does real semantic RCE detection."""
+    class already does real semantic RCE detection.
+
+    Policy (availability over security): outbound, vendor secrets block and tolerated
+    credentials are advisory; inbound, everything is advisory — a server sending the client
+    its own token is not an exfiltration, and blocking it broke login responses."""
     try:
         secret_findings = detect_secrets(text)
     except Exception as e:
@@ -135,8 +154,12 @@ def model_code_analysis(text):
     if not secret_findings:
         return AnalysisResult(module="code", score=0.0, findings=[])
     findings = [f"Secret Detected: {f.kind} (severity={f.severity})" for f in secret_findings]
-    risk = max((RiskLevel(f.severity) for f in secret_findings), key=list(RiskLevel).index)
-    return AnalysisResult(module="code", score=1.0, findings=findings, blocked=True, risk=risk)
+    hard = [f for f in secret_findings if f.kind not in _TOLERATED_SECRETS] if direction == "outbound" else []
+    if hard:
+        risk = max((RiskLevel(f.severity) for f in hard), key=list(RiskLevel).index)
+        return AnalysisResult(module="code", score=1.0, findings=findings, blocked=True, risk=risk)
+    return AnalysisResult(module="code", score=0.5, findings=findings, risk=RiskLevel.LOW,
+                          raw_data={"advisory": True})
 
 def model_patterns(text):
     """Presidio PII detection. Financial/government identifiers (credit card,
@@ -161,22 +184,59 @@ def model_patterns(text):
         logger.error(f"Presidio Error: {e}")
         return AnalysisResult(module="pattern", score=0.0, findings=[])
 
-def model_web_attack(text):
+WAF_MAX_VALUES = int(os.getenv("WAF_MAX_VALUES", "64"))
+WAF_MAX_VALUE_CHARS = int(os.getenv("WAF_MAX_VALUE_CHARS", "2000"))
+
+
+def _waf_inputs(text: str) -> list[str]:
+    """What the WAF should look at. JSON bodies are scored value-by-value (the way real
+    WAFs inspect parameters): the model was trained on bare payloads/URLs and classifies
+    the *shape* of a JSON blob (braces, quotes, "username"/"password") as SQL injection,
+    while the individual values are judged on their content. Anything else is scored whole."""
+    s = text.lstrip()
+    if not s.startswith(("{", "[")):
+        return [text[:WAF_MAX_VALUE_CHARS]]
+    try:
+        obj = json.loads(text)
+    except Exception:  # noqa: BLE001 — malformed JSON: fall back to the whole text
+        return [text[:WAF_MAX_VALUE_CHARS]]
+    out: list[str] = []
+
+    def walk(o):
+        if len(out) >= WAF_MAX_VALUES:
+            return
+        if isinstance(o, dict):
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+        elif o is not None and not isinstance(o, bool):
+            v = str(o).strip()
+            if v:
+                out.append(v[:WAF_MAX_VALUE_CHARS])
+    walk(obj)
+    return out
+
+
+def model_web_attack(text, parts=None):
     """Our trained WAF classifier — SQLi/XSS/traversal/cmd-injection/SSTI/scanner.
     The model's own calibrated block decision (WAF_ATTACK_THRESHOLD) and its
-    taxonomy risk level are surfaced directly, not re-derived from a score."""
+    taxonomy risk level are surfaced directly, not re-derived from a score.
+    `parts` overrides what is scored (request targets pass their pre-filtered values)."""
     if not waf_classifier:
         return AnalysisResult(module="web_attack", score=0.0, findings=["WAF model not loaded"])
     try:
-        pred = waf_classifier.predict(text)
-        if pred.blocked:
-            return AnalysisResult(
-                module="web_attack",
-                score=pred.score,
-                findings=[f"Web attack: {pred.label} (risk={pred.risk}, conf={pred.score:.2f})"],
-                blocked=True,
-                risk=RiskLevel(pred.risk),
-            )
+        for part in (parts if parts is not None else _waf_inputs(text)):
+            pred = waf_classifier.predict(part)
+            if pred.blocked:
+                return AnalysisResult(
+                    module="web_attack",
+                    score=pred.score,
+                    findings=[f"Web attack: {pred.label} (risk={pred.risk}, conf={pred.score:.2f})"],
+                    blocked=True,
+                    risk=RiskLevel(pred.risk),
+                )
         return AnalysisResult(module="web_attack", score=0.0, findings=[])
     except Exception as e:
         logger.error(f"WAF Error: {e}")
@@ -189,7 +249,9 @@ def model_prompt_injection(text):
     if not prompt_injection_classifier:
         return AnalysisResult(module="prompt_injection", score=0.0, findings=["Prompt-injection model not loaded"])
     try:
-        pred = prompt_injection_classifier.predict(text)
+        # Score the language an LLM would read (message contents), windowed so padding
+        # can't push an injection past the model's input limit — not the JSON wrapper.
+        pred = prompt_injection_classifier.predict_texts(extract_prompts(text))
         if pred.blocked:
             return AnalysisResult(
                 module="prompt_injection",
@@ -203,43 +265,127 @@ def model_prompt_injection(text):
         logger.error(f"Prompt-injection Error: {e}")
         return AnalysisResult(module="prompt_injection", score=0.0, findings=[])
 
+def model_pi_signatures(text, in_scope):
+    """IDS-style prompt-injection signatures (ml/prompt_injection/signatures.py).
+    Runs on all traffic: in LLM scope a hit blocks; elsewhere it is advisory only
+    (reported as a WARN on the dashboard, never blocks), because stock override
+    phrases in ordinary web traffic don't threaten anything."""
+    scan = "\n".join(extract_prompts(text)) if in_scope else text
+    hits = pi_signatures.detect(scan)
+    if not hits:
+        return AnalysisResult(module="prompt_injection_signature", score=0.0, findings=[])
+    names = sorted({h.kind for h in hits})
+    return AnalysisResult(
+        module="prompt_injection_signature",
+        score=1.0,
+        findings=[f"Prompt-injection signature: {', '.join(names)}"],
+        blocked=in_scope,
+        risk=RiskLevel.CRITICAL if in_scope else RiskLevel.LOW,
+        raw_data={"advisory": not in_scope, "signatures": names},
+    )
+
+
 def _route(text: str) -> str:
     if not router_classifier:
         return "web_request"  # safe default: still runs WAF, won't miss injection payloads
     return router_classifier.route(text).route
 
 
-async def analyze_text(request: Request):
-    try:
-        body = await request.json()
-    except:
-        return JSONResponse({"detail": "Invalid JSON"}, status_code=400)
+# --- Throughput controls -----------------------------------------------------
+# Verdicts are deterministic per body, and real traffic repeats bodies heavily
+# (OS/app telemetry), so identical bodies are analysed once (bounded LRU).
+# Model inference is blocking CPU work: it runs in worker threads, capped at
+# TEXT_MAX_CONCURRENCY, so one slow request can't freeze the event loop and
+# a burst queues cheaply instead of piling up inside the loop.
+_CACHE_MAX = int(os.getenv("TEXT_CACHE_SIZE", "2048"))
+_MAX_CONC = int(os.getenv("TEXT_MAX_CONCURRENCY", "2"))
+_cache: "OrderedDict[bytes, dict]" = OrderedDict()
+_cache_lock = threading.Lock()
+_sem: "asyncio.Semaphore | None" = None
 
-    text = body.get("text", "")
-    metadata = body.get("metadata", {})
 
-    logger.info(f"Analyzing text length: {len(text)}")
+def _cache_clear() -> None:
+    with _cache_lock:
+        _cache.clear()
 
-    # Secrets + PII + prompt-injection always run — cheap (regex/non-transformer)
-    # for the first two, and credential/PII leaks are too high-stakes to make
-    # conditional on the router's guess. Prompt-injection is unconditional too,
-    # despite being an expensive transformer call: adversarial testing found the
-    # router occasionally misroutes an injection-bearing form field to "code"
-    # (low-confidence edge case, ~0.47), and unlike the router's other known
-    # gap (misrouted benign code — a pure efficiency miss), this one means a
-    # real attack payload goes unchecked. Manipulating the firewall's own AI
-    # pipeline is high-severity enough that coupling its detection to router
-    # accuracy is the wrong tradeoff — sensitive-content and web_attack are
-    # the only two analyzers the router actually gates.
+
+def _reset_semaphore() -> None:
+    global _sem
+    _sem = None
+
+
+def _analyze_cached(text: str, in_scope: bool = False, direction: str = "outbound", kind: str = "") -> dict:
+    # The verdict depends on LLM scope, direction and whether this is a body or a request
+    # target, as well as the text, so all three are in the key.
+    tag = (b"L" if in_scope else b"W") + (b"o" if direction == "outbound" else b"i") + (b"u" if kind == "url" else b"b")
+    key = hashlib.sha256(tag + text.encode("utf-8", "ignore")).digest()
+    with _cache_lock:
+        if key in _cache:
+            _cache.move_to_end(key)
+            return _cache[key]
+    if kind == "url":
+        # request targets are only ever inspected outbound (the gateway enforces it too)
+        result = _analyze_target(text) if direction == "outbound" else _aggregate([], "request_target")
+    else:
+        result = _analyze_sync(text, in_scope, direction)
+    with _cache_lock:
+        _cache[key] = result
+        while len(_cache) > _CACHE_MAX:
+            _cache.popitem(last=False)
+    return result
+
+
+def _analyze_sync(text: str, in_scope: bool = False, direction: str = "outbound") -> dict:
+    # Secrets + PII + prompt-injection *signatures* always run — cheap regex, and
+    # credential/PII leaks are too high-stakes to make conditional on the router's
+    # guess. The prompt-injection MODEL runs only for traffic to an LLM endpoint
+    # (in_scope, see common/llm_scope.py): it scores text bound for an
+    # instruction-following model, and on ordinary web traffic (logins, pages, JSON
+    # echoes) it false-positives at saturated confidence, so no threshold fixes it.
+    # Outside LLM scope a signature hit is advisory (CENSOR -> dashboard WARN).
+    # sensitive-content and web_attack are the only analyzers the router gates.
     route = _route(text)
-    results = [model_code_analysis(text), model_patterns(text), model_prompt_injection(text)]
-    if route == "web_request":
-        results.append(model_web_attack(text))
-    elif route == "prose":
-        results.append(model_sensitive(text))
+    results = [model_code_analysis(text, direction), model_patterns(text), model_pi_signatures(text, in_scope)]
+    # Expensive analyzers run last and only if nothing has blocked yet: the verdict
+    # is an OR of block decisions, so once one has fired, running a slower analyzer
+    # can only add findings, not change the outcome.
+    if in_scope and not any(r.blocked for r in results):
+        results.append(model_prompt_injection(text))
+    if not any(r.blocked for r in results):
+        if route == "web_request":
+            # The WAF is a request-side control (it protects servers from what clients
+            # send). Inbound replies (pages, JSON echoes, robots.txt) were its main
+            # source of false positives, so it doesn't run on them: availability first.
+            if direction == "outbound":
+                results.append(model_web_attack(text))
+        elif route == "prose":
+            results.append(model_sensitive(text))
     # route == "code": secrets + PII + prompt-injection already cover the real
     # risk, skip the other two.
+    return _aggregate(results, route)
 
+
+def _analyze_target(target: str) -> dict:
+    """A request target (path + query string), not a body. Precision first: secrets in the
+    decoded URL, high-precision traversal/sensitive-file signatures, then the WAF model on the
+    few values with active characters (ml/waf/target.py). No router, PII, prompt-injection or
+    sensitive-content analysis: URLs are full of tokens/domains that would only add noise."""
+    results = []
+    sig = request_target.signature_hits(target)
+    if sig:
+        results.append(AnalysisResult(
+            module="request_target", score=1.0, findings=[f"Request target: {', '.join(sig)}"],
+            blocked=True, risk=RiskLevel.HIGH))
+    # Secrets in the URL: same policy as bodies (vendor secrets block, JWT/Google key/generic are
+    # advisory — a JWT in an SSO callback or magic link is normal).
+    results.append(model_code_analysis(request_target.decoded(target), "outbound"))
+    values = request_target.waf_values(target)
+    if values and not any(r.blocked for r in results):
+        results.append(model_web_attack("", parts=values))
+    return _aggregate(results, "request_target")
+
+
+def _aggregate(results, route: str) -> dict:
     findings = []
     detailed_scores = {}
     for r in results:
@@ -257,9 +403,15 @@ async def analyze_text(request: Request):
         risk = max((r.risk for r in blocked_results), key=list(RiskLevel).index)
         reason = "Blocked by: " + ", ".join(sorted({r.module for r in blocked_results}))
     else:
-        status = VerdictStatus.ALLOW
-        risk = RiskLevel.SAFE
-        reason = "No analyzer flagged a block"
+        advisories = [r for r in results if (r.raw_data or {}).get("advisory") and r.findings]
+        if advisories:
+            status = VerdictStatus.CENSOR   # allowed through; shows as a WARN row, no threat entry
+            risk = RiskLevel.LOW
+            reason = "Advisory (not blocked): " + "; ".join(f for r in advisories for f in r.findings)
+        else:
+            status = VerdictStatus.ALLOW
+            risk = RiskLevel.SAFE
+            reason = "No analyzer flagged a block"
 
     verdict = AggregatedVerdict(
         status=status,
@@ -267,8 +419,30 @@ async def analyze_text(request: Request):
         reason=reason,
         detailed_findings={"findings": findings, "scores": detailed_scores, "route": route}
     )
-    
-    return JSONResponse(dataclasses.asdict(verdict))
+
+    return dataclasses.asdict(verdict)
+
+
+async def analyze_text(request: Request):
+    global _sem
+    try:
+        body = await request.json()
+    except:
+        return JSONResponse({"detail": "Invalid JSON"}, status_code=400)
+
+    text = body.get("text", "")
+    md = body.get("metadata") or {}
+    direction = md.get("direction") or "outbound"
+    kind = md.get("kind") or ""
+    in_scope = False if kind == "url" else llm_scope.is_llm_request(
+        host=md.get("host"), path=md.get("path"), body=text, direction=direction)
+    logger.info(f"Analyzing text length: {len(text)} direction={direction} kind={kind or 'body'} llm_scope={in_scope}")
+
+    if _sem is None:
+        _sem = asyncio.Semaphore(_MAX_CONC)
+    async with _sem:
+        payload = await asyncio.to_thread(_analyze_cached, text, in_scope, direction, kind)
+    return JSONResponse(payload)
 
 routes = [
     Route("/analyze", analyze_text, methods=["POST"]),
