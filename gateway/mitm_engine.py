@@ -82,8 +82,39 @@ class TransparentProxy:
             pass
         return None
 
+    def _is_self(self, dest_ip, dest_port, client_writer) -> bool:
+        """Does the connection's original destination point back at this proxy?
+        That means the client connected straight to us (explicit-proxy style, or a probe)
+        instead of being REDIRECTed; forwarding would dial ourselves forever."""
+        if dest_port != self.port:
+            return False
+        local = client_writer.get_extra_info("sockname")
+        local_ip = local[0] if local else ""
+        return dest_ip in {"127.0.0.1", "::1", "0.0.0.0", local_ip}
+
     async def handle_client(self, client_reader, client_writer):
         dest_ip, dest_port = self.get_original_dest(client_writer)
+        if dest_ip and self._is_self(dest_ip, dest_port, client_writer):
+            # Transparent mode only. Dialing ourselves made one `curl -x 127.0.0.1:8080`
+            # an unbounded connection storm (100% CPU, dashboard flooded with loopback rows).
+            peer = client_writer.get_extra_info("peername")
+            logger.warning(f"Refusing direct connection from {peer}: this proxy is transparent-only "
+                           f"(needs iptables REDIRECT); not forwarding to itself")
+            body = (b"This is a transparent inspection proxy; it cannot be used as an explicit "
+                    b"proxy. Traffic must reach it through the firewall's iptables REDIRECT.\n")
+            try:
+                client_writer.write(
+                    b"HTTP/1.1 421 Misdirected Request\r\nContent-Type: text/plain\r\n"
+                    b"Content-Length: " + str(len(body)).encode() + b"\r\nConnection: close\r\n\r\n" + body)
+                await client_writer.drain()
+            except Exception:  # noqa: BLE001 — the peer may already be gone
+                pass
+            finally:
+                try:
+                    client_writer.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            return
         if not dest_ip:
             dest_ip = "127.0.0.1" 
             dest_port = 80 
