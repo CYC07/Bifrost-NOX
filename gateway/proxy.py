@@ -12,11 +12,26 @@ from mitm_engine import TransparentProxy
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from common.utils import FileSniffer, setup_logging
 from common.trusted_domains import is_trusted_connection
+from common.multipart import extract_file_parts
 from ml.waf.target import is_interesting as target_is_interesting
 
 # Setup Logging
 setup_logging("gateway")
 logger = logging.getLogger("gateway")
+
+def _doc_scan_mode() -> str:
+    """off = legacy (documents go to the text service); advisory (default) / block = documents
+    go to the document service. Advisory vs block is applied by the orchestrator."""
+    return os.environ.get("DOC_SCAN_MODE", "advisory").strip().lower()
+
+
+def _doc_max_bytes() -> int:
+    """Documents larger than this are allowed unanalysed (ZIP also covers APK/JAR/archives)."""
+    try:
+        return int(os.environ.get("DOC_SCAN_MAX_BYTES", str(20 * 1024 * 1024)))
+    except ValueError:
+        return 20 * 1024 * 1024
+
 
 MASTER_AI_URL = "http://localhost:8000/analyze_traffic"
 MASTER_LOG_URL = "http://localhost:8000/log_event"
@@ -110,8 +125,23 @@ class IDPInspector:
             logger.warning(f"BLOCK: High entropy text ({src_ip} -> {dst_ip}).")
             return "block"
 
+        # 2b. Uploaded files inside multipart/form-data: the whole body sniffs as text, so each file
+        # part is sniffed and routed on its own (document -> document service, image -> image service).
+        if direction == "outbound" and _doc_scan_mode() != "off":
+            if await self._inspect_upload_parts(headers, body, direction, src_ip, dst_ip, dst_port,
+                                                host, method, path) == "block":
+                return "block"
+
         # 3. AI Analysis
-        service_type = "image" if detected_type == "image" else "text"
+        if detected_type == "document":
+            mode = _doc_scan_mode()
+            if mode != "off" and len(body) > _doc_max_bytes():
+                logger.info(f"Document {len(body)} bytes over DOC_SCAN_MAX_BYTES; allowed unanalysed")
+                return "allow"
+            # mode "off" keeps the legacy route (text service)
+            service_type = "document" if mode != "off" else "text"
+        else:
+            service_type = "image" if detected_type == "image" else "text"
         if detected_type not in ["image", "text", "document"]:
              # Ignore others
              return "allow"
@@ -123,6 +153,26 @@ class IDPInspector:
             logger.warning(f"BLOCK AI ({src_ip} -> {dst_ip}): {verdict.get('reason')}")
             return "block"
 
+        return "allow"
+
+    async def _inspect_upload_parts(self, headers, body, direction, src_ip, dst_ip, dst_port, host, method, path):
+        """Analyse file parts of a multipart upload. Parse problems fail open ('allow')."""
+        try:
+            ctype = headers.get("content-type", "")
+            if "multipart/" not in str(ctype).lower():
+                return "allow"
+            for part in extract_file_parts(ctype, body, max_part_bytes=_doc_max_bytes()):
+                kind = FileSniffer.get_true_file_type(part.data)
+                if kind not in ("document", "image"):
+                    continue
+                logger.info(f"Inspecting uploaded {kind} part {part.filename!r} ({len(part.data)} bytes)")
+                v = await self.send_to_ai(kind, part.data, direction, src_ip, dst_ip, dst_port,
+                                          host=host, method=method, path=path)
+                if v.get("status") == "block":
+                    logger.warning(f"BLOCK AI upload part ({src_ip} -> {dst_ip}): {v.get('reason')}")
+                    return "block"
+        except Exception as exc:
+            logger.warning(f"Upload part inspection failed open: {type(exc).__name__}: {exc}")
         return "allow"
 
     async def send_to_ai(self, c_type, payload_bytes, direction, src_ip="unknown", dst_ip="unknown", dst_port="",
