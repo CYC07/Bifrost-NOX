@@ -57,11 +57,13 @@ This is a gateway people have to be able to use. Every default favours not break
 | **Request target** (path + query string, sent only when it looks interesting) | traversal / sensitive-file regex, secrets scan, WAF model on values with an *active* character (quotes, `<>;\|&$(){}`, `..`, SQL phrases; plain URLs and tokens are skipped) | signature hit, vendor secret, or WAF attack label ≥ threshold |
 | **Outbound body** | secrets, PII patterns, prompt-injection signatures, then router → WAF (JSON scored value-by-value) or zero-shot sensitive-content | vendor secret, PII, WAF/sensitive hit |
 | **Outbound body to an LLM endpoint** | all of the above + extracted message text scored by the prompt-injection model in overlapping windows; signature hits **block** | injection model ≥ threshold or signature |
-| **Inbound reply** | secrets, PII patterns, signatures; the WAF and the injection model do **not** run | PII pattern (secrets and signatures are advisory) |
+| **Inbound reply** | secrets, PII and signatures (all advisory); zero-shot sensitive-content; the WAF and the injection model do **not** run | sensitive-content hit only |
 | **Images** | CLIP multi-label, YOLOv8, OCR → secrets + PII, stego, file-safety guards | policy per group |
 | **Documents** | YARA, VirusTotal hash lookup, metadata forensics, structural anomaly (Isolation Forest) | any engine blocks |
 
 **Secret policy.** Outbound, vendor secrets that never belong on the wire (AWS keys, private keys, Stripe live keys, GitHub/Slack tokens, DB connection strings) block. Credentials that legitimately travel in requests and responses (JWTs, client-side Google API keys, a generic `password=`) are advisory. Inbound, everything is advisory.
+
+**PII policy.** Presidio findings block on *evidence*, not on entity type. A US SSN blocks only at Presidio confidence ≥ `PII_MIN_SCORE` (0.4): a bare nine-digit id scores 0.05 and is ignored, a formatted SSN scores 0.5, and one with context ("ssn", "social security") 0.85. A Luhn-valid number always scores 1.0, so a credit card additionally needs card formatting (`4111 1111 1111 1111`) or a card-ish word just before it (`card`, `cvv`, `visa`, …); a bare Luhn-valid identifier is advisory. This was found by capturing live blocks: a Windows push-notification reply and an app login body were being blocked as "SSN" at confidence 0.05. Phone/email are informational only.
 
 **LLM scope.** Prompt injection only matters for text that will reach an instruction-following model. Traffic is treated as LLM traffic when it is outbound **and** the host is in `config/llm_hosts.json`, the path ends in a known LLM API path (`/v1/chat/completions`, `/v1/messages`, …), or the JSON body looks like an LLM call (`model` + `messages`/`prompt`/`input`/`contents`). The list hot-reloads; add your company's internal LLM gateway there.
 
@@ -217,6 +219,7 @@ All settings are environment variables. `start_all.sh` sources a `.env` in the p
 | `WAF_MAX_VALUES` / `WAF_MAX_VALUE_CHARS` | `64` / `2000` | caps for per-value scoring |
 | `WAF_MODEL_PATH` | `ml/waf/artifacts/waf_distilbert` | joblib file or HF directory |
 | `PROMPT_INJECTION_THRESHOLD` | `0.9` | injection-model block cutoff (LLM traffic only) |
+| `PII_MIN_SCORE` | `0.4` | minimum Presidio confidence for an SSN/IBAN/card match to count |
 | `SENSITIVE_THRESHOLD` / `SENSITIVE_LABELS` | `0.6` / built-in | zero-shot sensitive-content cutoff / label override |
 | `IMAGE_MAX_CONCURRENCY`, `IMAGE_OCR_MAX_FRAMES`, `IMAGE_CLIP_MULTICROP`, `IMAGE_STEGO_STRICT` | `2`, `8`, off, off | image-service tuning |
 | `HOTSPOT_IF` / `INTERNET_IF` | `wlan1` / other wlan | interfaces used by the start/stop scripts |
@@ -299,7 +302,7 @@ source venv/bin/activate
 PYTHONPATH=. pytest tests -q
 ```
 
-Current baseline: **414 passed, 4 xfailed, 7 failed**.
+Current baseline: **445 passed, 4 xfailed, 7 failed**.
 
 - **4 xfailed** are known model limitations recorded as tests (two are `strict`, so the suite goes red if they ever start passing): the prompt-injection model flags the real example.com page, and the WAF still flags JSON values containing URLs / apostrophes.
 - **7 failed** are all in `tests/test_image_service.py`: with `transformers>=5`, `CLIPModel.get_text_features()` returns a `ModelOutput` instead of a tensor, so the CLIP classifier fails to load (the service degrades; OCR/stego/file checks still run). The fix is a one-line `getattr(feats, "pooler_output", feats)` in `ml/image/clip_classifier.py`.
@@ -364,7 +367,8 @@ ai_firewall/
 - **Request targets and bodies only.** Headers (cookies, `User-Agent`) and WebSocket frames are not inspected.
 - **Pinned clients** (apps and SDKs that ignore the system CA store) cannot be inspected; they are blocked or allowlisted.
 - **Traffic that never crosses the network** (a local LLM on the same machine) is invisible to a network firewall.
-- **Model false positives remain** in places: the WAF on values containing URLs/apostrophes, and the PII pattern analyzer on some inbound telemetry. They are tracked as failing/xfail tests or open issues rather than hidden by thresholds.
+- **Model false positives remain** in places: the WAF on values containing URLs/apostrophes, and the zero-shot sensitive-content model on some prose (e.g. terms-of-service text). They are tracked as xfail tests or open issues rather than hidden by thresholds.
+- **IBAN detection is unverified:** Presidio's IBAN recognizer did not match well-formed test IBANs in our probes, so don't rely on IBAN blocking.
 - **Prompt-injection signatures are a tripwire**, not a defence: paraphrases get through outside LLM scope (recall ≈ 83 % on the bundled eval set, 0 false positives on its benign items).
 - **Long prompts:** only up to 16 windows of 1,500 characters are scored, so an injection in the middle of a very large (>~16 KB) prompt can be missed.
 - Single-process services; sized for a lab / small network, not for production load.
