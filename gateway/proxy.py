@@ -11,6 +11,7 @@ from mitm_engine import TransparentProxy
 # Ensure we can import from common
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from common.utils import FileSniffer, setup_logging
+from ml.waf.target import is_interesting as target_is_interesting
 
 # Setup Logging
 setup_logging("gateway")
@@ -63,8 +64,21 @@ class IDPInspector:
         except Exception:
             pass
 
-    async def inspect_full(self, headers, body, direction, is_https, src_ip="unknown", dst_ip="unknown", dst_port=""):
-        """Called when a full HTTP message is captured"""
+    async def inspect_full(self, headers, body, direction, is_https, src_ip="unknown", dst_ip="unknown", dst_port="",
+                           host="", method="", path=""):
+        """Called when a full HTTP message is captured. host/method/path give the
+        analysis context (e.g. to tell LLM API traffic from ordinary web traffic)."""
+        # Request target (path + query string). Attacks there (SQLi/XSS/traversal in a GET) were
+        # never inspected: only bodies were, so they were only ever caught by accident via the
+        # server's echoed reply. A cheap local pre-filter keeps ordinary URLs off the AI path.
+        if direction == "outbound" and path and target_is_interesting(path):
+            logger.info(f"Inspecting request target {src_ip} -> {dst_ip}:{dst_port} {method} ({len(path)} chars)")
+            tv = await self.send_to_ai("text", path.encode("utf-8", "ignore"), direction, src_ip, dst_ip, dst_port,
+                                       host=host, method=method, path=path, kind="url")
+            if tv.get("status") == "block":
+                logger.warning(f"BLOCK AI target ({src_ip} -> {dst_ip}): {tv.get('reason')}")
+                return "block"
+
         if not body: return "allow"
 
         # Determine content type from headers or content
@@ -92,19 +106,26 @@ class IDPInspector:
              return "allow"
 
         # Send to Master AI
-        verdict = await self.send_to_ai(service_type, body, direction, src_ip, dst_ip, dst_port)
+        verdict = await self.send_to_ai(service_type, body, direction, src_ip, dst_ip, dst_port,
+                                        host=host, method=method, path=path)
         if verdict.get("status") == "block":
             logger.warning(f"BLOCK AI ({src_ip} -> {dst_ip}): {verdict.get('reason')}")
             return "block"
 
         return "allow"
 
-    async def send_to_ai(self, c_type, payload_bytes, direction, src_ip="unknown", dst_ip="unknown", dst_port=""):
+    async def send_to_ai(self, c_type, payload_bytes, direction, src_ip="unknown", dst_ip="unknown", dst_port="",
+                          host="", method="", path="", kind=""):
         data = {
             "content_type": c_type,
             "source_ip": src_ip,
             "destination_ip": dst_ip,
             "port": str(dst_port),
+            "direction": direction,
+            "host": host or "",
+            "method": method or "",
+            "path": path or "",
+            "kind": kind or "",      # "url" = payload is a request target (path+query), not a body
         }
         files = None
         if c_type == "text":
@@ -115,12 +136,24 @@ class IDPInspector:
         else:
             files = {"file": ("blob", payload_bytes, "application/octet-stream")}
             
+        # AI_TIMEOUT: seconds to wait for a verdict. AI_FAIL_MODE: what to do when no
+        # verdict arrives (timeout / error / non-200): "open" (default, documented
+        # fail-safe design — keep traffic flowing) or "closed" (block it). Fail-open is
+        # a bypass whenever analysis is slow, so it is logged loudly either way.
+        timeout = float(os.environ.get("AI_TIMEOUT", "10.0"))
+        reason = ""
         try:
-            resp = await self.client.post(MASTER_AI_URL, data=data, files=files, timeout=5.0)
+            resp = await self.client.post(MASTER_AI_URL, data=data, files=files, timeout=timeout)
             if resp.status_code == 200:
                 return resp.json()
+            reason = f"HTTP {resp.status_code} from analysis service"
         except Exception as e:
-            logger.error(f"AI Error: {e}")
+            # str(e) is empty for timeouts, which hid them in the logs
+            reason = f"{type(e).__name__}: {e}".rstrip(": ")
+        mode = os.environ.get("AI_FAIL_MODE", "open").lower()
+        logger.error(f"AI verdict unavailable ({reason}) for {direction} {src_ip}->{dst_ip}:{dst_port} — failing {mode}")
+        if mode == "closed":
+            return {"status": "block", "reason": f"AI analysis unavailable (fail-closed): {reason}"}
         return {"status": "allow"}
 
 def _iface_ip(iface: str) -> str:
@@ -147,8 +180,9 @@ if __name__ == "__main__":
 
     inspector = IDPInspector()
     proxy = TransparentProxy(host=bind_ip, inspector=inspector)
-    loop = asyncio.get_event_loop()
     try:
-        loop.run_until_complete(proxy.start())
+        # asyncio.get_event_loop() no longer auto-creates a loop outside one
+        # (removed in Python 3.14); asyncio.run() is the modern replacement.
+        asyncio.run(proxy.start())
     except KeyboardInterrupt:
         pass
