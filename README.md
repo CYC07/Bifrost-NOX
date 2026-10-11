@@ -67,6 +67,8 @@ This is a gateway people have to be able to use. Every default favours not break
 
 **Trusted domains.** Traffic to `microsoft.com`, `windows.com` and all their subdomains (`config/trusted_domains.json`, hot-reloaded) is treated as normal: TLS is tunnelled rather than intercepted, and no file-type block or model analysis runs. A firewall cannot see which *process* sent a packet, so "Windows' own processes" is approximated by "Windows' own domains". Matching is by DNS label: `evilmicrosoft.com` and `microsoft.com.evil.test` are not trusted, IP addresses never are, and attacker-registrable hosts such as `*.blob.core.windows.net` are deliberately not on the list. Trade-off: anything hosted under a trusted domain is invisible to the firewall, so keep the list narrow.
 
+The name alone is never enough, because SNI and `Host` are set by the client. A connection is trusted only if **every name it presents is trusted** (SNI and `Host` must agree, which defeats domain fronting) **and the real destination IP is inside Microsoft's published ranges** (`config/microsoft_ip_ranges.json`, which defeats a spoofed SNI aimed at an attacker's server). Refresh the ranges with `python scripts/update_microsoft_ranges.py`. Known limits: the ranges include Azure address space, which anyone can rent, so spoofing now requires running a VM in Azure rather than setting a header; CDN-fronted Microsoft hosts (Akamai, Cloudflare; about 18 % of destinations in the lab) cannot be verified by IP and get normal inspection; a missing ranges file also means normal inspection. `TRUSTED_VERIFY_IP=0` restores name-only trust.
+
 **LLM scope.** Prompt injection only matters for text that will reach an instruction-following model. Traffic is treated as LLM traffic when it is outbound **and** the host is in `config/llm_hosts.json`, the path ends in a known LLM API path (`/v1/chat/completions`, `/v1/messages`, …), or the JSON body looks like an LLM call (`model` + `messages`/`prompt`/`input`/`contents`). The list hot-reloads; add your company's internal LLM gateway there.
 
 ---
@@ -222,6 +224,7 @@ All settings are environment variables. `start_all.sh` sources a `.env` in the p
 | `WAF_MODEL_PATH` | `ml/waf/artifacts/waf_distilbert` | joblib file or HF directory |
 | `PROMPT_INJECTION_THRESHOLD` | `0.9` | injection-model block cutoff (LLM traffic only) |
 | `PII_MIN_SCORE` | `0.4` | minimum Presidio confidence for an SSN/IBAN/card match to count |
+| `TRUSTED_VERIFY_IP` | `1` | require a trusted-domain connection to land in Microsoft's IP ranges (`0` = name-only) |
 | `SENSITIVE_THRESHOLD` / `SENSITIVE_LABELS` | `0.6` / built-in | zero-shot sensitive-content cutoff / label override |
 | `IMAGE_MAX_CONCURRENCY`, `IMAGE_OCR_MAX_FRAMES`, `IMAGE_CLIP_MULTICROP`, `IMAGE_STEGO_STRICT` | `2`, `8`, off, off | image-service tuning |
 | `HOTSPOT_IF` / `INTERNET_IF` | `wlan1` / other wlan | interfaces used by the start/stop scripts |
