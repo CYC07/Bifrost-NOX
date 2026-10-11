@@ -44,7 +44,7 @@ def test_domains_and_all_their_subdomains_are_trusted(host):
     "microsoft.co", "microsoft.com.cn.evil.test", "xmicrosoft.com", "mymicrosoft.com",
     "evil.blob.core.windows.net",          # anyone can register a storage account
     "windows.net", "azurewebsites.net", "live.com", "msn.com", "bing.com", "oneclient.sfx.ms",
-    "example.com", "httpbin.org", "xpal.com",
+    "example.com", "httpbin.org", "corp.example.org",
 ])
 def test_lookalikes_and_attacker_registrable_hosts_are_not_trusted(host):
     assert not td.is_trusted(host)
