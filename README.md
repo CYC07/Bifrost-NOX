@@ -152,15 +152,18 @@ python -m spacy download en_core_web_lg    # Presidio's default NLP model
 |---|---|---|
 | CLIP ViT-B/32, DeBERTa-v3 zero-shot NLI, prompt-injection DeBERTa | Hugging Face Hub | downloaded automatically (~2 GB total) |
 | YOLOv8n | `yolov8n.pt` (gitignored) | place in the repo root or let ultralytics fetch it |
-| **WAF classifier** | `ml/waf/artifacts/` (**gitignored**) | **you must train or supply it** |
-| Content-shape router | `ml/router/artifacts/` (**gitignored**) | **you must train it** |
+| **WAF classifier** | `ml/waf/artifacts/` (**gitignored**) | **you must supply it** (see below) |
+| Content-shape router | `ml/router/artifacts/` (**gitignored**) | **you must supply it** (optional) |
 
-```bash
-python -m ml.waf.build_dataset && python -m ml.waf.train     # baseline TF-IDF + LogReg
-python -m ml.router.train
-# or drop a Colab-trained DistilBERT into ml/waf/artifacts/waf_distilbert/
-# (notebook: ml/waf/train_transformer.ipynb)
-```
+The trained models are not in the repo, and neither are the datasets or the training tooling (they are kept
+separately). To use your own:
+
+- **WAF:** a Hugging Face sequence-classification directory at `ml/waf/artifacts/waf_distilbert/` whose
+  `config.id2label` follows `ml/waf/taxonomy.py` (`clean, sqli, xss, path_traversal, command_injection, ssti,
+  scanner`), tokenised at `max_length=256`; or a scikit-learn pipeline `.joblib` with the same labels.
+  `WAF_MODEL_PATH` selects it and `WAF_THRESHOLD` (default `0.5`) sets the decision threshold.
+- **Router:** a `.joblib` pipeline predicting `code / web_request / prose` (`ml/router/taxonomy.py`).
+
 
 Without the WAF artifact the `web_attack` analyzer is disabled and everything else keeps working (fail-open); without the router every body is treated as a web request.
 
@@ -361,7 +364,7 @@ ai_firewall/
 - **Pinned clients** (apps and SDKs that ignore the system CA store) cannot be inspected; they are blocked or allowlisted.
 - **Traffic that never crosses the network** (a local LLM on the same machine) is invisible to a network firewall.
 - **Model false positives remain** in places: the WAF on values containing URLs/apostrophes, and the zero-shot sensitive-content model on some prose (e.g. terms-of-service text). They are tracked as open issues rather than hidden by thresholds.
-- **WAF v2 (in progress):** the shipping WAF model was trained on data where shape predicted the label (every benign JSON body scored `sqli`). `python -m ml.waf.v2.build` builds a shape-balanced, group-split dataset from public PayloadsAllTheThings/SecLists/FuzzDB (plus a privacy denylist via `WAF_V2_DENYLIST`), and `ml/waf/train_v2.ipynb` trains two DistilBERT arms on Colab against explicit ship gates. On 25 independent hand-written probes a quick TF-IDF model trained on the v2 data cut benign false positives from 10/15 to 2/15 and caught 10/10 attacks (v1: 9/10); the DistilBERT arms have **not** been trained or gated yet, so the shipping model is unchanged.
+- **WAF training data bias (known):** the first WAF model was trained on data where the carrier shape predicted the label (every benign JSON body scored `sqli`). Per-value scoring and the policy layer work around it; a retrain on shape-balanced data is in progress outside this repository.
 - **IBAN detection is unverified:** Presidio's IBAN recognizer did not match well-formed test IBANs in our probes, so don't rely on IBAN blocking.
 - **Prompt-injection signatures are a tripwire**, not a defence: paraphrases get through outside LLM scope (recall ≈ 83 % on the bundled eval set, 0 false positives on its benign items).
 - **Long prompts:** only up to 16 windows of 1,500 characters are scored, so an injection in the middle of a very large (>~16 KB) prompt can be missed.
