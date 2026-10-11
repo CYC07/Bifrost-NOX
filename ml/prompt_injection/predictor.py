@@ -17,6 +17,9 @@ import logging
 import os
 from dataclasses import dataclass
 
+from ml.prompt_injection.html_text import extract_text
+from ml.prompt_injection.prompts import windows
+
 logger = logging.getLogger("prompt_injection.predictor")
 
 DEFAULT_MODEL = os.getenv("PROMPT_INJECTION_MODEL", "protectai/deberta-v3-base-prompt-injection-v2")
@@ -57,6 +60,9 @@ class PromptInjectionClassifier:
         if not text or not text.strip():
             return PromptInjectionPrediction("SAFE", 0.0, False, risk="safe")
         try:
+            text = extract_text(text)  # raw HTML/CSS/JS is out-of-distribution -> false INJECTION
+            if not text.strip():
+                return PromptInjectionPrediction("SAFE", 0.0, False, risk="safe")
             out = self._pipe(text[:2000], truncation=True)[0]
             label = out["label"]
             score = float(out["score"])
@@ -66,6 +72,35 @@ class PromptInjectionClassifier:
                 score=score,
                 blocked=blocked,
                 risk="critical" if blocked else "safe",
+            )
+        except Exception as exc:  # noqa: BLE001 — fail open on any inference error
+            logger.error("Prompt-injection inference failed: %s", exc)
+            return PromptInjectionPrediction("SAFE", 0.0, False, risk="safe", note=f"inference error: {exc}")
+
+    def predict_texts(self, texts: list[str], max_windows: int = 32) -> PromptInjectionPrediction:
+        """Score several strings (e.g. an LLM request's messages), each split into
+        overlapping windows so padding can't push an injection past the model's
+        input limit. Blocks if ANY window is flagged; score is the max injection prob."""
+        if not self._loaded:
+            return PromptInjectionPrediction("SAFE", 0.0, False, risk="safe", note="model not loaded")
+        chunks: list[str] = []
+        for t in texts:
+            t = extract_text(t)
+            if t and t.strip():
+                chunks.extend(windows(t))
+        chunks = chunks[:max_windows]
+        if not chunks:
+            return PromptInjectionPrediction("SAFE", 0.0, False, risk="safe")
+        try:
+            outs = self._pipe(chunks, truncation=True, batch_size=8)
+            top = 0.0
+            for o in outs:
+                if o["label"] == INJECTION_LABEL:
+                    top = max(top, float(o["score"]))
+            blocked = top >= self.threshold
+            return PromptInjectionPrediction(
+                label=INJECTION_LABEL if blocked else "SAFE",
+                score=top, blocked=blocked, risk="critical" if blocked else "safe",
             )
         except Exception as exc:  # noqa: BLE001 — fail open on any inference error
             logger.error("Prompt-injection inference failed: %s", exc)
