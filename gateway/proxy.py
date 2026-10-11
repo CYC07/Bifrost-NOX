@@ -11,7 +11,7 @@ from mitm_engine import TransparentProxy
 # Ensure we can import from common
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from common.utils import FileSniffer, setup_logging
-from common.trusted_domains import is_trusted as host_is_trusted
+from common.trusted_domains import is_trusted_connection
 from ml.waf.target import is_interesting as target_is_interesting
 
 # Setup Logging
@@ -66,12 +66,17 @@ class IDPInspector:
             pass
 
     async def inspect_full(self, headers, body, direction, is_https, src_ip="unknown", dst_ip="unknown", dst_port="",
-                           host="", method="", path=""):
+                           host="", method="", path="", server_name="", dest_ip=""):
         """Called when a full HTTP message is captured. host/method/path give the
         analysis context (e.g. to tell LLM API traffic from ordinary web traffic)."""
         # Trusted-domain policy (config/trusted_domains.json): Windows/Microsoft infrastructure is
-        # normal traffic - no file-type block, no model analysis.
-        if host_is_trusted(host):
+        # normal traffic - no file-type block, no model analysis. The names are client-claimed, so
+        # the Host header AND the SNI (when there is one; plain HTTP has none) must both be trusted
+        # and the real destination IP must be in Microsoft's ranges.
+        names = [host]
+        if server_name and server_name != dest_ip:
+            names.append(server_name)
+        if is_trusted_connection(names, dest_ip):
             return "allow"
 
         # Request target (path + query string). Attacks there (SQLi/XSS/traversal in a GET) were

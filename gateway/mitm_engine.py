@@ -10,7 +10,7 @@ from http_parser import HTTPParser
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from common.allowlist import is_allowed as is_host_allowed  # noqa: E402
-from common.trusted_domains import is_trusted as is_host_trusted  # noqa: E402
+from common.trusted_domains import is_trusted_connection  # noqa: E402
 
 logger = logging.getLogger("mitm_engine")
 SO_ORIGINAL_DST = 80
@@ -179,7 +179,7 @@ class TransparentProxy:
                 self.inspector.log_connection(client_ip, dest_ip, dest_port, is_tls, server_name)
             )
 
-        if self._bypass_mitm(server_name, is_tls):
+        if self._bypass_mitm(server_name, is_tls, dest_ip):
             logger.info(f"ALLOWLIST bypass (no MITM): {server_name}")
             await self.tunnel_through(
                 client_reader, client_writer, dest_ip, dest_port, server_name, client_ip
@@ -191,9 +191,12 @@ class TransparentProxy:
         else:
             await self.handle_http(client_reader, client_writer, dest_ip, dest_port, server_name, client_ip)
 
-    def _bypass_mitm(self, server_name, is_tls):
-        """TLS to an allowlisted (cert-pinned) or trusted-domain host is tunnelled, not intercepted."""
-        return bool(is_tls and (is_host_allowed(server_name) or is_host_trusted(server_name)))
+    def _bypass_mitm(self, server_name, is_tls, dest_ip):
+        """TLS to an allowlisted (cert-pinned) host, or to a trusted domain that really resolves
+        into Microsoft's address space, is tunnelled instead of intercepted."""
+        if not is_tls:
+            return False
+        return bool(is_host_allowed(server_name) or is_trusted_connection([server_name], dest_ip))
 
     async def tunnel_through(self, client_reader, client_writer, dest_ip, dest_port, server_name, client_ip):
         """Raw TCP passthrough for allowlisted cert-pinned apps.
@@ -327,6 +330,7 @@ class TransparentProxy:
                 parser.headers, parser.body, direction, is_https,
                 src_ip=src, dst_ip=dst, dst_port=dest_port,
                 host=real_dst,
+                server_name=server_name, dest_ip=dest_ip,
                 method=(getattr(parser, "method", "") or "") if direction == "outbound" else "",
                 path=(getattr(parser, "path", "") or "") if direction == "outbound" else "",
             )

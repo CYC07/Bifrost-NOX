@@ -16,7 +16,11 @@ import logging
 import os
 import threading
 
+from common import ip_ranges
+
 logger = logging.getLogger("trusted_domains")
+
+VERIFY_IP = os.getenv("TRUSTED_VERIFY_IP", "1").strip().lower() not in ("0", "false", "off", "no")
 
 _PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "config", "trusted_domains.json"))
 DEFAULT_DOMAINS = ("microsoft.com", "windows.com")
@@ -87,7 +91,21 @@ def _normalise(host) -> str:
 
 
 def is_trusted(host) -> bool:
+    """Name-only check. Names are claimed by the client; use is_trusted_connection for decisions."""
     h = _normalise(host)
     if not h:
         return False
     return any(h == d or h.endswith("." + d) for d in _domains())
+
+
+def is_trusted_connection(names, dest_ip) -> bool:
+    """A connection is trusted only if EVERY name the client presented (TLS SNI, Host header) is
+    trusted - so SNI and Host must agree, defeating domain fronting - and the real destination IP
+    lies in Microsoft's published ranges, defeating a spoofed SNI to an attacker's server.
+    No range data -> not trusted (normal inspection). Set TRUSTED_VERIFY_IP=0 for name-only."""
+    presented = [n for n in (names or []) if isinstance(n, str) and n.strip()]
+    if not presented or not all(is_trusted(n) for n in presented):
+        return False
+    if not VERIFY_IP:
+        return True
+    return ip_ranges.contains(dest_ip)
