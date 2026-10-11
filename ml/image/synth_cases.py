@@ -26,6 +26,12 @@ _FONT = None
 for _cand in (
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    # Arch and other distros: DejaVu elsewhere, or a metric-similar *sans* face. Sans fonts OCR
+    # the fake keys intact; Liberation/Free Mono were measured to drop or misread characters.
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/gnu-free/FreeSans.otf",
 ):
     try:
         _FONT = ImageFont.truetype(_cand, 28)
