@@ -304,22 +304,7 @@ curl -X POST http://<firewall-ip>:8000/allowlist \
 
 ---
 
-## Testing
-
-```bash
-source venv/bin/activate
-PYTHONPATH=. pytest tests -q
-```
-
-Current baseline: **606 passed, 4 xfailed, 0 failed**.
-
-- **4 xfailed** are known model limitations recorded as tests (two are `strict`, so the suite goes red if they ever start passing): the prompt-injection model flags the real example.com page, and the WAF still flags JSON values containing URLs / apostrophes.
-- **7 failed** are all in `tests/test_image_service.py`: with `transformers>=5`, `CLIPModel.get_text_features()` returns a `ModelOutput` instead of a tensor, so the CLIP classifier fails to load (the service degrades; OCR/stego/file checks still run). The fix is a one-line `getattr(feats, "pooler_output", feats)` in `ml/image/clip_classifier.py`.
-- Some tests are skipped when model artifacts are absent.
-
-`tests/data/pi_eval.jsonl` is a small labelled attack/benign set used by the prompt-injection tests.
-
-### Testing with a VM (host-only lab)
+## Trying it in a VM
 
 VirtualBox **NAT mode does not work** for this: NAT traffic is re-originated by the VirtualBox process, so it never traverses the host's `PREROUTING`/`FORWARD` chains and the REDIRECT never fires. Use a host-only network and make the host the gateway, exactly like the hotspot:
 
@@ -363,7 +348,6 @@ ai_firewall/
 │   └── image/            # CLIP labels/classifier, OCR scan, stego, file safety
 ├── network_inspector/    # C++ NFQUEUE engine + Python ZMQ bridge
 ├── text_service/         # analysis pipeline (secrets, PII, WAF, injection, sensitive)
-├── tests/                # pytest suite + tests/data eval sets
 ├── docs/screenshots/     # README images
 ├── start_all.sh · start_network.sh · stop_all.sh
 └── requirements.txt
@@ -376,7 +360,7 @@ ai_firewall/
 - **Request targets and bodies only.** Headers (cookies, `User-Agent`) and WebSocket frames are not inspected.
 - **Pinned clients** (apps and SDKs that ignore the system CA store) cannot be inspected; they are blocked or allowlisted.
 - **Traffic that never crosses the network** (a local LLM on the same machine) is invisible to a network firewall.
-- **Model false positives remain** in places: the WAF on values containing URLs/apostrophes, and the zero-shot sensitive-content model on some prose (e.g. terms-of-service text). They are tracked as xfail tests or open issues rather than hidden by thresholds.
+- **Model false positives remain** in places: the WAF on values containing URLs/apostrophes, and the zero-shot sensitive-content model on some prose (e.g. terms-of-service text). They are tracked as open issues rather than hidden by thresholds.
 - **WAF v2 (in progress):** the shipping WAF model was trained on data where shape predicted the label (every benign JSON body scored `sqli`). `python -m ml.waf.v2.build` builds a shape-balanced, group-split dataset from public PayloadsAllTheThings/SecLists/FuzzDB (plus a privacy denylist via `WAF_V2_DENYLIST`), and `ml/waf/train_v2.ipynb` trains two DistilBERT arms on Colab against explicit ship gates. On 25 independent hand-written probes a quick TF-IDF model trained on the v2 data cut benign false positives from 10/15 to 2/15 and caught 10/10 attacks (v1: 9/10); the DistilBERT arms have **not** been trained or gated yet, so the shipping model is unchanged.
 - **IBAN detection is unverified:** Presidio's IBAN recognizer did not match well-formed test IBANs in our probes, so don't rely on IBAN blocking.
 - **Prompt-injection signatures are a tripwire**, not a defence: paraphrases get through outside LLM scope (recall ≈ 83 % on the bundled eval set, 0 false positives on its benign items).
