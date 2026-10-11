@@ -10,6 +10,7 @@ from http_parser import HTTPParser
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from common.allowlist import is_allowed as is_host_allowed  # noqa: E402
+from common.trusted_domains import is_trusted as is_host_trusted  # noqa: E402
 
 logger = logging.getLogger("mitm_engine")
 SO_ORIGINAL_DST = 80
@@ -178,7 +179,7 @@ class TransparentProxy:
                 self.inspector.log_connection(client_ip, dest_ip, dest_port, is_tls, server_name)
             )
 
-        if is_tls and is_host_allowed(server_name):
+        if self._bypass_mitm(server_name, is_tls):
             logger.info(f"ALLOWLIST bypass (no MITM): {server_name}")
             await self.tunnel_through(
                 client_reader, client_writer, dest_ip, dest_port, server_name, client_ip
@@ -189,6 +190,10 @@ class TransparentProxy:
             await self.handle_https(client_reader, client_writer, dest_ip, dest_port, server_name, client_ip)
         else:
             await self.handle_http(client_reader, client_writer, dest_ip, dest_port, server_name, client_ip)
+
+    def _bypass_mitm(self, server_name, is_tls):
+        """TLS to an allowlisted (cert-pinned) or trusted-domain host is tunnelled, not intercepted."""
+        return bool(is_tls and (is_host_allowed(server_name) or is_host_trusted(server_name)))
 
     async def tunnel_through(self, client_reader, client_writer, dest_ip, dest_port, server_name, client_ip):
         """Raw TCP passthrough for allowlisted cert-pinned apps.

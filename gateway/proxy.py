@@ -11,6 +11,7 @@ from mitm_engine import TransparentProxy
 # Ensure we can import from common
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from common.utils import FileSniffer, setup_logging
+from common.trusted_domains import is_trusted as host_is_trusted
 from ml.waf.target import is_interesting as target_is_interesting
 
 # Setup Logging
@@ -68,6 +69,11 @@ class IDPInspector:
                            host="", method="", path=""):
         """Called when a full HTTP message is captured. host/method/path give the
         analysis context (e.g. to tell LLM API traffic from ordinary web traffic)."""
+        # Trusted-domain policy (config/trusted_domains.json): Windows/Microsoft infrastructure is
+        # normal traffic - no file-type block, no model analysis.
+        if host_is_trusted(host):
+            return "allow"
+
         # Request target (path + query string). Attacks there (SQLi/XSS/traversal in a GET) were
         # never inspected: only bodies were, so they were only ever caught by accident via the
         # server's echoed reply. A cheap local pre-filter keeps ordinary URLs off the AI path.
