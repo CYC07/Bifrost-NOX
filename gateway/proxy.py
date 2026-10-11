@@ -33,6 +33,20 @@ def _doc_max_bytes() -> int:
         return 20 * 1024 * 1024
 
 
+def _has_field_content(body: bytes) -> bool:
+    """True if a multipart body (file parts already removed) still carries field values, i.e.
+    something besides boundary lines and part headers."""
+    for line in body.split(b"\r\n"):
+        s = line.strip()
+        if not s or s.startswith(b"--"):
+            continue
+        low = s.lower()
+        if low.startswith(b"content-disposition:") or low.startswith(b"content-type:"):
+            continue
+        return True
+    return False
+
+
 MASTER_AI_URL = "http://localhost:8000/analyze_traffic"
 MASTER_LOG_URL = "http://localhost:8000/log_event"
 
@@ -120,17 +134,26 @@ class IDPInspector:
             logger.warning(f"BLOCK: Executable detected ({src_ip} -> {dst_ip}).")
             return "block"
 
+        # 1b. Uploaded files inside multipart/form-data: the whole body sniffs as text, so each file
+        # part is sniffed and routed on its own (document -> document service, image -> image
+        # service). The routed bytes are then removed from the body so the remaining fields are
+        # analysed without the file content (a PDF's text was being scored by the WAF as an attack).
+        if direction == "outbound" and _doc_scan_mode() != "off":
+            verdict, remaining = await self._inspect_upload_parts(headers, body, direction, src_ip, dst_ip,
+                                                                  dst_port, host, method, path)
+            if verdict == "block":
+                return "block"
+            if remaining is not None:
+                if not _has_field_content(remaining):
+                    return "allow"
+                body = remaining
+                detected_type = FileSniffer.get_true_file_type(body)
+                entropy = FileSniffer.calculate_entropy(body)
+
         # 2. SECURITY: High Entropy Text
         if detected_type == "text" and entropy > 7.5:
             logger.warning(f"BLOCK: High entropy text ({src_ip} -> {dst_ip}).")
             return "block"
-
-        # 2b. Uploaded files inside multipart/form-data: the whole body sniffs as text, so each file
-        # part is sniffed and routed on its own (document -> document service, image -> image service).
-        if direction == "outbound" and _doc_scan_mode() != "off":
-            if await self._inspect_upload_parts(headers, body, direction, src_ip, dst_ip, dst_port,
-                                                host, method, path) == "block":
-                return "block"
 
         # 3. AI Analysis
         if detected_type == "document":
@@ -156,11 +179,15 @@ class IDPInspector:
         return "allow"
 
     async def _inspect_upload_parts(self, headers, body, direction, src_ip, dst_ip, dst_port, host, method, path):
-        """Analyse file parts of a multipart upload. Parse problems fail open ('allow')."""
+        """Analyse file parts of a multipart upload.
+
+        Returns (verdict, remaining): remaining is the body with the routed document/image parts
+        removed (None when nothing was routed). Parse problems fail open ('allow', None)."""
+        remaining = None
         try:
             ctype = headers.get("content-type", "")
             if "multipart/" not in str(ctype).lower():
-                return "allow"
+                return "allow", None
             for part in extract_file_parts(ctype, body, max_part_bytes=_doc_max_bytes()):
                 kind = FileSniffer.get_true_file_type(part.data)
                 if kind not in ("document", "image"):
@@ -170,10 +197,12 @@ class IDPInspector:
                                           host=host, method=method, path=path)
                 if v.get("status") == "block":
                     logger.warning(f"BLOCK AI upload part ({src_ip} -> {dst_ip}): {v.get('reason')}")
-                    return "block"
+                    return "block", None
+                remaining = (body if remaining is None else remaining).replace(part.data, b"", 1)
         except Exception as exc:
             logger.warning(f"Upload part inspection failed open: {type(exc).__name__}: {exc}")
-        return "allow"
+            return "allow", None
+        return "allow", remaining
 
     async def send_to_ai(self, c_type, payload_bytes, direction, src_ip="unknown", dst_ip="unknown", dst_port="",
                           host="", method="", path="", kind=""):
