@@ -76,6 +76,8 @@ THREAT_PATTERNS: list[tuple[str, str, str, float]] = [
     ("prompt injection", "Prompt Injection", "critical", 0.97),
     ("request_target", "Malicious Request Target", "high", 0.92),
     ("web_attack", "Web Attack", "high", 0.90),
+    ("code", "Secret Leak", "high", 0.95),        # analyzer module names, as in "Blocked by: code"
+    ("pattern", "PII Exposure", "high", 0.90),
     ("injection", "Command Injection", "critical", 0.98),
     ("malware", "Malware Payload", "critical", 0.96),
     ("eicar", "EICAR Test Signature", "medium", 0.99),

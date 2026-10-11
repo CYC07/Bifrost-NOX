@@ -34,7 +34,7 @@ def pi_calls(monkeypatch):
     calls = []
     monkeypatch.setattr(svc, "_route", lambda t: "code")
     monkeypatch.setattr(svc, "model_code_analysis", lambda t, *a, **k: _res("code"))
-    monkeypatch.setattr(svc, "model_patterns", lambda t: _res("pattern"))
+    monkeypatch.setattr(svc, "model_patterns", lambda t, *a, **k: _res("pattern"))
     monkeypatch.setattr(svc, "model_prompt_injection", lambda t: (calls.append(t), _res("prompt_injection", True))[1])
     svc._cache_clear()
     svc._reset_semaphore()
