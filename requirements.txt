@@ -1,4 +1,4 @@
-starlette
+starlette<1.0  # 1.x dropped the on_startup= kwarg master_ai/orchestrator.py relies on
 cryptography
 
 
@@ -11,12 +11,18 @@ NetfilterQueue
 requests
 
 # Image Analysis (Vision AI)
-torch --index-url https://download.pytorch.org/whl/cpu
+# CPU-only PyTorch. Must be --extra-index-url (additive), NOT --index-url: inside a
+# requirements file --index-url replaces PyPI globally and breaks every other package.
+# torchvision must come from the same index or its compiled ops mismatch the torch build
+# (ultralytics pulls it, and a plain-PyPI torchvision vs torch+cpu -> "torchvision::nms does not exist").
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+torchvision
 transformers
 sentencepiece  # DeBERTa-v3 tokenizer for text_service sensitive-content model
 ultralytics
 pytesseract
-clip
+# clip  # vestigial: PyPI "clip" is not OpenAI CLIP, and nothing imports it (CLIP runs as its own service)
 Pillow
 numpy
 
