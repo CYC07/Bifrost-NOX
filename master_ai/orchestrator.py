@@ -282,6 +282,16 @@ async def analyze_traffic(request: Request) -> JSONResponse:
                 resp = await client.post(f"{DOCUMENT_SERVICE_URL}/analyze", files=files)
                 if resp.status_code == 200:
                     verdict = AggregatedVerdict(**resp.json())
+                    # The document analyzers have a measured, non-zero false-positive rate on real
+                    # benign PDFs, so by default a block is advisory (warn row, nothing blocked);
+                    # DOC_SCAN_MODE=block enforces it.
+                    if (os.environ.get("DOC_SCAN_MODE", "advisory").strip().lower() != "block"
+                            and verdict.status == VerdictStatus.BLOCK):
+                        verdict = AggregatedVerdict(
+                            status=VerdictStatus.CENSOR, risk_level="medium",
+                            reason=f"Advisory (DOC_SCAN_MODE=advisory): {verdict.reason}",
+                            detailed_findings=verdict.detailed_findings,
+                        )
                 else:
                     verdict = _no_verdict(f"document service HTTP {resp.status_code}", verdict)
 
