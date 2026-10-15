@@ -1,0 +1,8 @@
+# datasets, built splits and notebook outputs are local-only
+*/data/
+*/build*/
+*.zip
+*.joblib
+__pycache__/
+*.pyc
+shadow_verdicts.jsonl

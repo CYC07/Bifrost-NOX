@@ -155,8 +155,7 @@ python -m spacy download en_core_web_lg    # Presidio's default NLP model
 | **WAF classifier** | `ml/waf/artifacts/` (**gitignored**) | **you must supply it** (see below) |
 | Content-shape router | `ml/router/artifacts/` (**gitignored**) | **you must supply it** (optional) |
 
-The trained models are not in the repo, and neither are the datasets or the training tooling (they are kept
-separately). To use your own:
+The trained models and datasets are not in the repo (training tooling is in `dataset_tools/`). To use your own:
 
 - **WAF:** a Hugging Face sequence-classification directory at `ml/waf/artifacts/waf_distilbert/` whose
   `config.id2label` follows `ml/waf/taxonomy.py` (`clean, sqli, xss, path_traversal, command_injection, ssti,
@@ -307,6 +306,20 @@ curl -X POST http://<firewall-ip>:8000/allowlist \
 
 ---
 
+## Testing
+
+```bash
+source venv/bin/activate
+PYTHONPATH=. pytest tests dataset_tools/tests -q
+```
+
+Current baseline: **607 passed, 4 xfailed, 0 failed** (520 + 4 xfailed in `tests/`, 87 in `dataset_tools/tests/`).
+
+- **4 xfailed** are known model limitations recorded as tests (two are `strict`, so the suite goes red if they ever start passing).
+- Some tests are skipped when model artifacts are absent.
+- `tests/data/pi_eval.jsonl` is a small labelled attack/benign set used by the prompt-injection tests.
+- `dataset_tools/` holds the dataset builders, trainers and Colab notebooks (WAF, router, image corpus); see its README. Datasets and built splits are git-ignored.
+
 ## Trying it in a VM
 
 VirtualBox **NAT mode does not work** for this: NAT traffic is re-originated by the VirtualBox process, so it never traverses the host's `PREROUTING`/`FORWARD` chains and the REDIRECT never fires. Use a host-only network and make the host the gateway, exactly like the hotspot:
@@ -351,6 +364,8 @@ ai_firewall/
 │   └── image/            # CLIP labels/classifier, OCR scan, stego, file safety
 ├── network_inspector/    # C++ NFQUEUE engine + Python ZMQ bridge
 ├── text_service/         # analysis pipeline (secrets, PII, WAF, injection, sensitive)
+├── tests/                # pytest suite (+ tests/data eval set)
+├── dataset_tools/        # dataset builders, trainers, notebooks (not imported at runtime)
 ├── docs/screenshots/     # README images
 ├── start_all.sh · start_network.sh · stop_all.sh
 └── requirements.txt
@@ -364,7 +379,7 @@ ai_firewall/
 - **Pinned clients** (apps and SDKs that ignore the system CA store) cannot be inspected; they are blocked or allowlisted.
 - **Traffic that never crosses the network** (a local LLM on the same machine) is invisible to a network firewall.
 - **Model false positives remain** in places: the WAF on values containing URLs/apostrophes, and the zero-shot sensitive-content model on some prose (e.g. terms-of-service text). They are tracked as open issues rather than hidden by thresholds.
-- **WAF training data bias (known):** the first WAF model was trained on data where the carrier shape predicted the label (every benign JSON body scored `sqli`). Per-value scoring and the policy layer work around it; a retrain on shape-balanced data is in progress outside this repository.
+- **WAF training data bias (known):** the first WAF model was trained on data where the carrier shape predicted the label (every benign JSON body scored `sqli`). Per-value scoring and the policy layer work around it; a retrain on shape-balanced data is prepared in `dataset_tools/waf/v2` (Colab notebook `dataset_tools/waf/train_v2.ipynb`) but has not been run.
 - **IBAN detection is unverified:** Presidio's IBAN recognizer did not match well-formed test IBANs in our probes, so don't rely on IBAN blocking.
 - **Prompt-injection signatures are a tripwire**, not a defence: paraphrases get through outside LLM scope (recall ≈ 83 % on the bundled eval set, 0 false positives on its benign items).
 - **Long prompts:** only up to 16 windows of 1,500 characters are scored, so an injection in the middle of a very large (>~16 KB) prompt can be missed.
