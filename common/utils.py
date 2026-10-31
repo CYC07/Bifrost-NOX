@@ -47,12 +47,42 @@ class FileSniffer:
         "mp3": b"\xff\xfb",   # MPEG Audio (approx)
     }
 
+    # OLE2 / Compound File header: the container of legacy .doc/.xls/.ppt (and also .msi, .msg,
+    # .vsd ...), so the magic alone is not enough to call a file "legacy Office".
+    OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+    # Directory-entry names that only Word / Excel (BIFF8 and BIFF5) / PowerPoint write, as stored
+    # on disk: UTF-16LE, NUL-terminated.
+    _OFFICE_STREAMS = tuple(n.encode("utf-16-le") + b"\x00\x00"
+                            for n in ("WordDocument", "Workbook", "Book", "PowerPoint Document", "PP40"))
+
+    @staticmethod
+    def is_legacy_office(content: bytes) -> bool:
+        """True for a legacy Word/Excel/PowerPoint binary: OLE magic AND an Office stream name sitting
+        in a directory slot. Directory entries are 128 bytes and the header is a whole number of
+        128-byte slots (512 or 4096), so a real entry starts at a multiple of 128; a document that
+        merely quotes the string elsewhere does not count. Encrypted OOXML (EncryptedPackage),
+        MSI, Outlook .msg and Visio share the container but carry none of these names."""
+        if not content.startswith(FileSniffer.OLE_MAGIC):
+            return False
+        for needle in FileSniffer._OFFICE_STREAMS:
+            i = content.find(needle)
+            while i != -1:
+                if i % 128 == 0:
+                    return True
+                i = content.find(needle, i + 1)
+        return False
+
     @staticmethod
     def get_true_file_type(content: bytes) -> str:
         """
-        Returns a simplified type: 'image', 'document', 'executable', 'text', or 'unknown'
+        Returns a simplified type: 'image', 'document', 'executable', 'legacy_office', 'text', or 'unknown'
         """
         header = content[:16] # Look at first 16 bytes
+
+        # OLE2 container: only Word/Excel/PowerPoint binaries get their own type (they are blocked
+        # outright by the gateway); any other OLE file stays an unknown binary as before.
+        if header.startswith(FileSniffer.OLE_MAGIC):
+            return "legacy_office" if FileSniffer.is_legacy_office(content) else "binary_unknown"
 
         # 1. Check Magic Numbers
         for ext, sig in FileSniffer.SIGNATURES.items():
