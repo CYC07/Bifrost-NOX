@@ -26,7 +26,7 @@ from ml.secrets.detector import detect as detect_secrets
 from ml.router.predictor import RouterClassifier
 from ml.prompt_injection.predictor import PromptInjectionClassifier
 from ml.prompt_injection import signatures as pi_signatures
-from ml.prompt_injection.prompts import extract_prompts
+from ml.prompt_injection.prompts import extract_prompts, extract_segments
 from common import llm_scope
 from ml.waf import target as request_target
 from ml.waf.gate import waf_gate_parts
@@ -315,13 +315,19 @@ def model_web_attack(text, parts=None):
 def model_prompt_injection(text):
     """Prompt-injection detection (protectai deberta) — flags text attempting
     to manipulate an LLM's instructions (ignore-previous-instructions,
-    role-override jailbreaks, fake embedded system directives)."""
+    role-override jailbreaks, fake embedded system directives).
+
+    The classifier's request gate (ml/prompt_injection/gating.py) decides block / advisory /
+    allow: a strong score, or a lower score plus a structural cue, blocks; weaker evidence
+    and anything found only in developer-authored `system` text is reported as advisory
+    (CENSOR -> dashboard WARN) and the request goes through."""
     if not prompt_injection_classifier:
         return AnalysisResult(module="prompt_injection", score=0.0, findings=["Prompt-injection model not loaded"])
     try:
-        # Score the language an LLM would read (message contents), windowed so padding
-        # can't push an injection past the model's input limit — not the JSON wrapper.
-        pred = prompt_injection_classifier.predict_texts(extract_prompts(text))
+        # Score the language an LLM would read (message contents, with their roles), windowed so
+        # padding can't push an injection past the model's input limit — not the JSON wrapper.
+        segs = extract_segments(text)
+        pred = prompt_injection_classifier.predict_texts([s.text for s in segs], roles=[s.role for s in segs])
         if pred.blocked:
             return AnalysisResult(
                 module="prompt_injection",
@@ -329,6 +335,14 @@ def model_prompt_injection(text):
                 findings=[f"Prompt injection detected (conf={pred.score:.2f})"],
                 blocked=True,
                 risk=RiskLevel(pred.risk),
+            )
+        if getattr(pred, "advisory", False):
+            return AnalysisResult(
+                module="prompt_injection",
+                score=pred.score,
+                findings=[f"Possible prompt injection, weak evidence (conf={pred.score:.2f}, {getattr(pred, 'reason', '')})"],
+                risk=RiskLevel.LOW,
+                raw_data={"advisory": True, "reason": getattr(pred, "reason", ""), "cues": list(getattr(pred, "cues", ()))},
             )
         return AnalysisResult(module="prompt_injection", score=0.0, findings=[])
     except Exception as e:
