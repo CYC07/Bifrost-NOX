@@ -40,7 +40,7 @@ from urllib.parse import quote, quote_plus
 
 from dataset_tools.waf.v2 import payloads as P
 
-WAF_ROOT = os.getenv("WAF_DATASETS", "/home/pentest/FYP/waf_datasets")
+WAF_ROOT = os.path.expanduser(os.getenv("WAF_DATASETS", "~/waf_datasets"))
 SPLITS_DIR = os.path.join(WAF_ROOT, "build_v2")
 
 HELD_OUT_FILES = [  # (relative to WAF_ROOT, label or None = classify per line)
