@@ -542,3 +542,102 @@ def test_probe_data_is_self_consistent():
     assert {lab for _, lab, _ in probes.PROBES} <= set(LABELS)
     assert max(len(t) for t in texts) < 2048
     assert all(t.strip() for t in texts)
+
+
+# --- notebook: holdout evaluation + gates generated from gate.py ----------------------------------------------
+def _nb_cell(prefix):
+    from dataset_tools.waf.v2 import make_notebook
+    for c in make_notebook.build()["cells"]:
+        src = "".join(c["source"])
+        if src.startswith(prefix):
+            return src
+    raise AssertionError(f"no notebook cell starts with {prefix!r}")
+
+
+def test_notebook_gate_cell_is_generated_from_gate_py():
+    import ast
+    from dataset_tools.waf.v2 import gate
+    src = _nb_cell("# 9. ship gates")
+    lit = next(n for n in ast.parse(src).body
+               if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "GATES")
+    assert ast.literal_eval(lit.value) == {k: gate.GATES[k] for k in gate.NOTEBOOK_GATE_KEYS}
+    assert "def gate_checks" in src and "replay" not in ast.literal_eval(lit.value)
+
+
+def test_committed_notebook_is_the_generators_output():
+    from dataset_tools.waf.v2 import make_notebook
+    with open(make_notebook.OUT, encoding="utf-8") as f:
+        assert json.load(f) == make_notebook.build(), "run: python -m dataset_tools.waf.v2.make_notebook"
+
+
+def test_notebook_requires_the_holdout_file_and_says_how_to_build_it():
+    src = _nb_cell("# 2. data")
+    assert "test_holdout.jsonl" in src and "--holdout-source" in src
+    assert "assert os.path.exists" in src, "an old default-build zip must stop the notebook, not pass silently"
+
+
+def test_notebook_after_download_names_the_right_env_vars_and_the_gate():
+    from dataset_tools.waf.v2 import make_notebook
+    md = "\n".join("".join(c["source"]) for c in make_notebook.build()["cells"] if c["cell_type"] == "markdown")
+    assert "WAF_ATTACK_THRESHOLD" in md and "dataset_tools.waf.v2.gate" in md and "WAF_THRESHOLD" in md
+
+
+def _run_eval_cells(flag_for):
+    """Execute notebook cells 7 (evaluate), 8 (independent battery) and 9 (gates) with stub scorers."""
+    import numpy as np
+    from dataset_tools.waf.v2 import probes as pr
+    rows = {}
+
+    def mk(label, shape, text, source="x:y", name=None):
+        r = {"text": text, "label": label, "shape": shape, "source": source}
+        if name:
+            r["name"] = name
+        return r
+    clean = [mk("clean", s, f"clean {s} {i}") for s in ("json", "form") for i in range(60)]
+    attack = [mk("sqli", s, f"attack {s} {i}") for s in ("json", "form") for i in range(60)]
+    test_rows = clean + attack
+    ood_rows = [mk("clean", "cookie", f"clean cookie {i}") for i in range(50)] + [mk("xss", "cookie", f"attack cookie {i}") for i in range(50)]
+    hold_rows = ([mk("clean", "native", t, "handwritten:benign_bodies", n) for n, t in pr.REALISTIC_BENIGN]
+                 + [mk("clean", "json", f"wrapped {n}", "handwritten:benign_bodies", n) for n, _ in pr.REALISTIC_BENIGN[:15]]
+                 + [mk("sqli", "bare", f"fuzzdb attack {i}", "fuzzdb:x") for i in range(100)])
+    probe_rows = [mk(lab, "probe", t, "handwritten:waf_probe", n) for n, lab, t in pr.PROBES]
+    every = test_rows + ood_rows + hold_rows + probe_rows
+    label_of = {r["text"]: r["label"] for r in every}
+
+    def scorer(texts):
+        flags = np.array([flag_for(t, label_of[t]) for t in texts], dtype=float)
+        return flags, ["sqli" if f > 0.5 else "clean" for f in flags]
+    ns = {"np": np, "json": json, "ATTACKS": LABELS[1:], "test": test_rows, "ood": ood_rows, "hold": hold_rows,
+          "probe_rows": probe_rows, "ARMS": {"A_softmax7": scorer}, "THR": {"A_softmax7": 0.5}}
+    for prefix in ("# 7.", "# 8.", "# 9."):
+        exec(compile(_nb_cell(prefix), prefix, "exec"), ns)       # noqa: S102 - the notebook's own cells
+    return ns
+
+
+def test_notebook_evaluates_holdout_and_independent_battery_and_gates_on_stub_scorers(tmp_path, capsys):
+    from dataset_tools.waf.v2 import gate, probes as pr
+    ns = _run_eval_cells(lambda t, lab: 0.9 if lab != "clean" else 0.1)
+    h = ns["R"]["A_softmax7"]["holdout"]
+    assert h["n_clean"] == len(pr.REALISTIC_BENIGN) + 15 and h["n_attack"] == 100 and h["fp"] == 0 and h["recall"] == 1
+    assert ns["IND"]["A_softmax7"] == {"benign_fp": 0, "attacks_caught": 9, "n_benign": 15, "n_attack": 9}
+    assert ns["PASS"]["A_softmax7"] is True
+    # what the notebook exports is accepted by the standalone gate (same checks, same verdict)
+    res = {k: ns[k] for k in ("R", "IND", "THR", "PASS")}
+    rp = tmp_path / "r.json"
+    rp.write_text(json.dumps(res))
+    art = tmp_path / "art"
+    art.mkdir()
+    (art / "waf_v2.json").write_text(json.dumps({"arm": "A_softmax7", "recommended_threshold": 0.5}))
+    assert gate.main(["--results", str(rp), "--artifact", str(art), "--skip-replay"]) == 0
+    assert [(n, ok) for n, ok, _d in ns["CHECKS"]["A_softmax7"]] == [(n, ok) for n, ok, _d in gate.gate_checks(
+        {**ns["R"]["A_softmax7"], "ind": ns["IND"]["A_softmax7"]}, gate.GATES)]
+
+
+def test_notebook_gate_fails_when_the_model_blocks_realistic_benign_bodies(tmp_path):
+    from dataset_tools.waf.v2 import gate
+    ns = _run_eval_cells(lambda t, lab: 0.9 if (lab != "clean" or "wrapped" in t) else 0.1)
+    h = ns["R"]["A_softmax7"]["holdout"]
+    assert h["fp"] > gate.GATES["holdout_benign_fp"]
+    assert ns["PASS"]["A_softmax7"] is False
+    failed = [n for n, ok, _d in ns["CHECKS"]["A_softmax7"] if not ok]
+    assert any("holdout benign FP" in n for n in failed)
