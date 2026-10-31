@@ -18,7 +18,7 @@ import sys
 
 sys.path.insert(0, os.getcwd())
 ROOT = os.path.expanduser("~/FYP/corpora")
-SETS = ["doc_benign", "doc_ambiguous", "doc_malicious_real", "doc_malicious_synth"]
+SETS = ["doc_benign", "doc_benign_system", "doc_ambiguous", "doc_malicious_real", "doc_malicious_synth"]
 
 
 def main() -> None:
@@ -52,12 +52,12 @@ def main() -> None:
             print(f"   {mod:9s} score>0.5: {sum(1 for r in rs if r['scores'][mod] > 0.5)}")
         by = collections.defaultdict(lambda: [0, 0])
         for r in rs:
-            k = (r["source"], r["category"] if s != "doc_benign" else r["kind"])
+            k = (r["source"], r["category"] if not s.startswith("doc_benign") else r["kind"])
             by[k][0] += 1
             by[k][1] += is_block(r)
         for k, (n, b) in sorted(by.items()):
             print(f"   {k[0]:13s} {k[1]:32s} {b}/{n}")
-        if s == "doc_benign":
+        if s.startswith("doc_benign"):
             for r in rs:
                 if is_block(r):
                     print("   FP:", r["file"], r["scores"], r["findings"])
