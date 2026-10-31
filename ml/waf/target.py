@@ -85,6 +85,68 @@ def waf_values(target: str) -> list[str]:
     return keep
 
 
+_ESCAPE = re.compile(r"%[0-9a-fA-F]{2}")
+_PATH_PREFIX = re.compile(r"^[^\s=&?#]*\?")
+_FORM_START = re.compile(r"^[\w.\[\]-]{1,64}=")
+
+
+def worth_scoring(v: str) -> bool:
+    """Is this decoded value attack-shaped enough to show the model? An active character or SQL
+    phrase, a traversal / sensitive-file signature, or undecodable bytes (overlong %c0%af
+    sequences decode to U+FFFD). Plain words, paths and URLs are left alone."""
+    return bool(_ACTIVE.search(v) or "\ufffd" in v or _TRAVERSAL.search(v) or _SENSITIVE.search(v))
+
+
+def has_escapes(s: str) -> bool:
+    """True when `s` carries %XX escapes (so decoding it can change what the WAF sees)."""
+    return bool(_ESCAPE.search(s or ""))
+
+
+def decode_text(s: str) -> str:
+    """Percent-decode up to twice WITHOUT turning '+' into a space (free text keeps its '+')."""
+    from urllib.parse import unquote
+    for _ in range(2):
+        d = unquote(s, errors="replace")
+        if d == s:
+            break
+        s = d
+    return s
+
+
+def _form_part(body: str) -> str | None:
+    """The `k=v&k=v` part of a body (a leading `/path?` is dropped), or None if not form-shaped."""
+    t = (body or "")[:_MAX_TARGET]
+    m = _PATH_PREFIX.match(t)
+    if m:
+        t = t[m.end():]
+    return t if _FORM_START.match(t) else None
+
+
+def is_form(body: str) -> bool:
+    return _form_part(body) is not None
+
+
+def body_values(body: str) -> list[str]:
+    """Decoded, attack-shaped values of a urlencoded-looking body (`a=1&q=...`, optionally with a
+    leading `/path?`). Same precision filter as waf_values (an active character or SQL phrase,
+    not a plain URL), capped. [] when the body is not key=value shaped."""
+    t = _form_part(body)
+    if t is None:
+        return []
+    keep: list[str] = []
+    for part in t.split("&"):
+        _, eq, raw = part.partition("=")
+        if not eq or not raw:
+            continue
+        v = _decode(raw)
+        if not v.strip() or _PLAIN_URL.match(v) or not worth_scoring(v):
+            continue
+        keep.append(v[:MAX_VALUE_CHARS])
+        if len(keep) >= MAX_VALUES:
+            break
+    return keep
+
+
 def signature_hits(target: str) -> list[str]:
     """High-precision regex findings on the decoded path + query (names only)."""
     path, query = _split(target)
