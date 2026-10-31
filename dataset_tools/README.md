@@ -48,6 +48,13 @@ python -I dataset_tools/sensitive/nli_pool.py --repo . --eval ~/FYP/corpora/sens
 python -I dataset_tools/sensitive/features.py --repo .           # router + Presidio + secrets (needs ml/router/artifacts)
 python -I dataset_tools/sensitive/nli_pool.py --repo . --eval ~/FYP/corpora/sens_eval/eval.jsonl --out ~/FYP/corpora/sens_eval/pool_s2.jsonl --stage 2
 python -I dataset_tools/sensitive/baseline_report.py --repo . --split test ; python -I dataset_tools/sensitive/sweep.py --repo .
+# consumer questions / chat requests (benign): build, score (stage 1 + ToS contrast), report, re-tune, real-model end-to-end per tree
+python -I dataset_tools/sensitive/fetch.py --only chat_dolly,chat_finance ; python -I dataset_tools/sensitive/build_chat_eval.py
+python -I dataset_tools/sensitive/nli_pool.py --repo . --eval ~/FYP/corpora/sens_eval/chat_eval.jsonl --out ~/FYP/corpora/sens_eval/pool_chat_s1.jsonl --stage 1
+python -I dataset_tools/sensitive/nli_pool.py --repo . --eval ~/FYP/corpora/sens_eval/chat_eval.jsonl --out ~/FYP/corpora/sens_eval/pool_chat_s2.jsonl --stage 3
+python -I dataset_tools/sensitive/features.py --repo . --eval ~/FYP/corpora/sens_eval/chat_eval.jsonl --out ~/FYP/corpora/sens_eval/features_chat.jsonl
+python -I dataset_tools/sensitive/chat_report.py --repo . ; python -I dataset_tools/sensitive/sweep_chat.py --repo . --qa-cap 0.01
+python -I dataset_tools/sensitive/chat_e2e.py --repo <tree> --tools .
 
 # Tool tests (and the firewall's own image tests use image/synth_cases.py)
 python -m pytest dataset_tools/tests -q
