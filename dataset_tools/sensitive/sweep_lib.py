@@ -45,6 +45,8 @@ NEG_GROUPS = {
     "financial_public": ["neg_fin_news_bbc", "neg_fin_filings_sec"],
     "docs": ["neg_docs_man", "neg_docs_readme"],
     "other": ["neg_news_cnn", "neg_news_xsum", "neg_wiki", "neg_blogs", "neg_recipes"],
+    # ordinary consumer questions / chats about bank, savings, loans, insurance, health, legal, pay (build_chat_eval.py)
+    "consumer_qa": ["chatq_template", "chatq_finance", "chatq_dolly", "chatq_medquad", "chatq_multiturn", "chatq_statement"],
 }
 SET2GROUP = {s: g for gs in (POS_GROUPS, NEG_GROUPS) for g, ss in gs.items() for s in ss}
 
@@ -66,13 +68,14 @@ class Data:
         return [i for i, r in enumerate(self.recs) if f(r)]
 
 
-def load(repo: str, need_stage2: bool = True, include_tiny: bool = False) -> Data:
+def load(repo: str, need_stage2: bool = True, include_tiny: bool = False, chat: bool = True) -> Data:
+    """chat=True adds the consumer-question set (chat_eval.jsonl, scored with stage 1 + the ToS contrast class)."""
     sys.path.insert(0, repo)
     from ml.sensitive.evidence import find_evidence
-    recs = jl(f"{DIR}/eval.jsonl") + (jl(f"{DIR}/tiny.jsonl") if include_tiny else [])
-    s1 = {r["id"]: r["s"] for r in jl(f"{DIR}/pool_s1.jsonl") + jl(f"{DIR}/pool_tiny_s1.jsonl")}
-    s2 = {r["id"]: r["s"] for r in jl(f"{DIR}/pool_s2.jsonl") + jl(f"{DIR}/pool_tiny_s2.jsonl")}
-    ft = {r["id"]: r for r in jl(f"{DIR}/features.jsonl")}
+    recs = jl(f"{DIR}/eval.jsonl") + (jl(f"{DIR}/tiny.jsonl") if include_tiny else []) + (jl(f"{DIR}/chat_eval.jsonl") if chat else [])
+    s1 = {r["id"]: r["s"] for r in jl(f"{DIR}/pool_s1.jsonl") + jl(f"{DIR}/pool_tiny_s1.jsonl") + jl(f"{DIR}/pool_chat_s1.jsonl")}
+    s2 = {r["id"]: r["s"] for r in jl(f"{DIR}/pool_s2.jsonl") + jl(f"{DIR}/pool_tiny_s2.jsonl") + jl(f"{DIR}/pool_chat_s2.jsonl")}
+    ft = {r["id"]: r for r in jl(f"{DIR}/features.jsonl") + jl(f"{DIR}/features_chat.jsonl")}
     out = Data([], [], [], [])
     for r in recs:
         if r["id"] not in s1 or (need_stage2 and r["id"] not in s2):
@@ -102,7 +105,7 @@ def base_rule(thr: float = 0.6, keys=None) -> dict:
     return {"keys": list(keys), "thr": {k: thr for k in keys}}
 
 
-def decide(rule: dict, s: dict[str, float], ev: list[str]) -> tuple[bool, str]:
+def decide(rule: dict, s: dict[str, float], ev: list[str], question: bool = False) -> tuple[bool, str]:
     """Reference implementation (mirrors ml.sensitive.predictor.decide_from_scores).
 
     rule keys:
@@ -115,7 +118,9 @@ def decide(rule: dict, s: dict[str, float], ev: list[str]) -> tuple[bool, str]:
     """
     keys = rule["keys"]
     best_k = max(keys, key=lambda k: s.get(k, 0.0))
-    ident = sum(1 for e in ev if e in IDENT)
+    if rule.get("question") and question and not ev:
+        return False, best_k        # a short question with no hard evidence is never blocked on topic alone
+    ident =sum(1 for e in ev if e in IDENT)
     if rule.get("identity_bundle") and ident >= rule["identity_bundle"]:
         return True, "identity-bundle"
     contrast = rule.get("contrast")
@@ -143,6 +148,7 @@ class Arrays:
     label: np.ndarray
     group: np.ndarray
     length: np.ndarray
+    q: np.ndarray | None = None      # question_form(text)
 
     def sel(self, *, label: str | None = None, group: str | list[str] | None = None, sets: list[str] | None = None,
             split: str = "all", min_len: int = 0, max_len: int = 10**9) -> np.ndarray:
@@ -160,12 +166,14 @@ class Arrays:
 
 
 def arrays(d: Data) -> Arrays:
+    from ml.sensitive.evidence import question_form
     keys = sorted({k for s in d.scores for k in s})
     S = {k: np.array([s.get(k, 0.0) for s in d.scores]) for k in keys}
     return Arrays(
         S, np.array([len(e) for e in d.ev]), np.array([sum(1 for x in e if x in IDENT) for e in d.ev]), len(d.recs),
         np.array([r["set"] for r in d.recs]), np.array([r["split"] for r in d.recs]), np.array([r["label"] for r in d.recs]),
-        np.array([SET2GROUP.get(r["set"], "tiny") for r in d.recs]), np.array([len(r["text"]) for r in d.recs]))
+        np.array([SET2GROUP.get(r["set"], "tiny") for r in d.recs]), np.array([len(r["text"]) for r in d.recs]),
+        np.array([question_form(r["text"]) for r in d.recs]))
 
 
 def vblock(rule: dict, A: Arrays) -> np.ndarray:
@@ -184,6 +192,8 @@ def vblock(rule: dict, A: Arrays) -> np.ndarray:
         if contrast:
             hit = hit & (s - cmax >= rule.get("margin", 0.0))
         out |= hit
+    if rule.get("question") and A.q is not None:
+        out &= ~(A.q & (A.ev == 0))
     return out
 
 
@@ -202,7 +212,7 @@ def shipped_rule() -> dict:
             low[k] = spec.low
     contrast = [rev[h] for h in lb.contrast_labels()]
     return {"keys": keys, "thr": thr, "low": low, "min_ev": lb.MIN_EVIDENCE, "contrast": contrast or None,
-            "margin": lb.MARGIN, "identity_bundle": lb.IDENTITY_BUNDLE}
+            "margin": lb.MARGIN, "identity_bundle": lb.IDENTITY_BUNDLE, "question": True}
 
 
 # ----------------------------------------------------------------------------- end-to-end gate

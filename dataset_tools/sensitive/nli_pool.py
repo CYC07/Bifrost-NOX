@@ -89,7 +89,7 @@ def main() -> None:
     ap.add_argument("--eval", default=os.path.expanduser("~/FYP/corpora/sens_eval/eval.jsonl"))
     ap.add_argument("--out", default="")
     ap.add_argument("--window", default="first")
-    ap.add_argument("--stage", type=int, default=1, help="1 = the six production hypotheses, 2 = the extra pool")
+    ap.add_argument("--stage", type=int, default=1, help="1 = the six production hypotheses, 2 = the extra pool, 3 = only b2:tos (chat_eval)")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--parity", action="store_true")
     ap.add_argument("--repo", default=os.getcwd())
@@ -99,7 +99,7 @@ def main() -> None:
     if a.parity:
         parity(tok, model)
         return
-    keys = STAGE1 if a.stage == 1 else STAGE2
+    keys = STAGE1 if a.stage == 1 else STAGE2 if a.stage == 2 else ["b2:tos"]   # 3 = only the shipped contrast class
     hyps = {k: POOL[k] for k in keys}
     recs = [json.loads(l) for l in open(a.eval, encoding="utf-8")]
     if a.limit:

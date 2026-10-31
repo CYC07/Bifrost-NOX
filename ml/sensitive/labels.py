@@ -45,10 +45,15 @@ def _label(name: str, risk: str, block: float, low: float | None = None) -> Sens
 # files) and "classified or restricted government information" only on medical text. Dropping them also takes
 # a third off the NLI cost of every request.
 SENSITIVE: dict[str, SensitiveLabel] = {
-    "conf": _label("confidential or internal company document", "high", 0.8, 0.2),
-    "fin": _label("sensitive personal financial records or account statements", "high", 0.4, 0.2),
-    "med": _label("private medical or health record", "critical", 0.5, 0.2),
-    "legal": _label("confidential legal or contractual document", "high", 0.95, 0.2),
+    # Re-tuned with ordinary consumer questions/statements in the benign pool (sweep_chat.py): the finance label
+    # scores "How is my credit score calculated?" at 0.96 and "I want to dispute a charge on my credit card" at
+    # 0.98, so on its own it never blocks (1.01 = unreachable) and only counts together with hard evidence
+    # (an account/ID number, a marking, ...). The 0.4 / 0.5 of the first calibration had been chosen without
+    # such questions. Short questions are handled before the NLI (evidence.question_form).
+    "conf": _label("confidential or internal company document", "high", 0.9, 0.1),
+    "fin": _label("sensitive personal financial records or account statements", "high", 1.01, 0.1),
+    "med": _label("private medical or health record", "critical", 0.6, 0.2),
+    "legal": _label("confidential legal or contractual document", "high", 0.95, 0.1),
 }
 
 # benign contrast classes (full hypothesis sentences); empty = no contrast rule
