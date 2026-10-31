@@ -131,7 +131,10 @@ class IDPInspector:
         # Determine content type from headers or content
         c_type_header = headers.get("content-type", "")
 
-        detected_type = FileSniffer.get_true_file_type(body)
+        # A multipart envelope merely CONTAINS files (they are sniffed per part), so the lenient
+        # "PDF header within the first KiB" rule must not fire on the envelope itself.
+        lenient_pdf = "multipart/" not in str(c_type_header).lower()
+        detected_type = FileSniffer.get_true_file_type(body, lenient_pdf=lenient_pdf)
         entropy = FileSniffer.calculate_entropy(body)
 
         logger.info(f"Inspecting {direction} {src_ip} -> {dst_ip}:{dst_port} ({len(body)} bytes) | Header: {c_type_header} | Type: {detected_type}")
@@ -159,7 +162,7 @@ class IDPInspector:
                 if not _has_field_content(remaining):
                     return "allow"
                 body = remaining
-                detected_type = FileSniffer.get_true_file_type(body)
+                detected_type = FileSniffer.get_true_file_type(body, lenient_pdf=lenient_pdf)
                 entropy = FileSniffer.calculate_entropy(body)
 
         # 2. SECURITY: High Entropy Text

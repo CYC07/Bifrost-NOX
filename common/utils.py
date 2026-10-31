@@ -1,5 +1,6 @@
 import math
 import logging
+import re
 import os
 import sys
 
@@ -47,6 +48,8 @@ class FileSniffer:
         "mp3": b"\xff\xfb",   # MPEG Audio (approx)
     }
 
+    _PDF_HEADER = re.compile(rb"%PDF-")
+
     # OLE2 / Compound File header: the container of legacy .doc/.xls/.ppt (and also .msi, .msg,
     # .vsd ...), so the magic alone is not enough to call a file "legacy Office".
     OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
@@ -73,7 +76,7 @@ class FileSniffer:
         return False
 
     @staticmethod
-    def get_true_file_type(content: bytes) -> str:
+    def get_true_file_type(content: bytes, lenient_pdf: bool = True) -> str:
         """
         Returns a simplified type: 'image', 'document', 'executable', 'legacy_office', 'text', or 'unknown'
         """
@@ -93,6 +96,13 @@ class FileSniffer:
                     return "document" 
                 if ext in ["exe", "elf"]:
                     return "executable"
+
+        # PDF readers (and our own YARA/structure analyzers) accept "%PDF-" anywhere in the first
+        # KiB, and the version after it may be truncated or missing, so junk or comment text in front
+        # (or a sloppy "%PDF-1.") must not hide the file from the document service. A bare "%PDF" at
+        # offset 0 was already a document above (unchanged); mid-text mentions need the hyphen.
+        if lenient_pdf and FileSniffer._PDF_HEADER.search(content[:1024]):
+            return "document"
 
         # 2. Check for Text vs Binary via Null Bytes and ASCII
         # If it contains null bytes in the first 1kb, it's likely binary (unless it's UTF-16)
