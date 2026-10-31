@@ -139,7 +139,7 @@ def extract(data: bytes) -> Dict[str, Any]:
             return _extract_with_exiftool(data)
         except Exception as exc:
             logger.warning("exiftool extraction failed, falling back: %s", exc)
-    if data.startswith(b"%PDF"):
+    if b"%PDF" in data[:1024]:
         return _extract_pdf_metadata(data)
     if data.startswith(b"PK\x03\x04"):
         return _extract_office_metadata(data)
@@ -203,7 +203,9 @@ def analyze(data: bytes) -> AnalysisResult:
         findings.append("Document contains tracked changes / revision history")
         score += 0.25
 
-    score = min(score, 0.9)
+    # Forensic/privacy findings (path leaks, GPS, tracked changes) are never a
+    # block-level signal on their own; keep them well under the 0.8 max-score rule.
+    score = min(score, 0.45)
 
     return AnalysisResult(
         module="metadata",
