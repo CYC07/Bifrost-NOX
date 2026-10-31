@@ -25,6 +25,13 @@ def _doc_scan_mode() -> str:
     return os.environ.get("DOC_SCAN_MODE", "advisory").strip().lower()
 
 
+def _legacy_office_policy() -> str:
+    """block (default) = legacy Word/Excel/PowerPoint binaries (.doc/.xls/.ppt, OLE2) are blocked
+    outright, like executables: there is no OLE analyzer and they are a classic macro carrier.
+    allow = no special handling."""
+    return os.environ.get("LEGACY_OFFICE_POLICY", "block").strip().lower()
+
+
 def _doc_max_bytes() -> int:
     """Documents larger than this are allowed unanalysed (ZIP also covers APK/JAR/archives)."""
     try:
@@ -134,11 +141,16 @@ class IDPInspector:
             logger.warning(f"BLOCK: Executable detected ({src_ip} -> {dst_ip}).")
             return "block"
 
+        # 1a. SECURITY: legacy Office binary (.doc/.xls/.ppt) - blocked outright (LEGACY_OFFICE_POLICY).
+        if detected_type == "legacy_office" and _legacy_office_policy() == "block":
+            logger.warning(f"BLOCK: Legacy Office binary (OLE2 .doc/.xls/.ppt) ({src_ip} -> {dst_ip}).")
+            return "block"
+
         # 1b. Uploaded files inside multipart/form-data: the whole body sniffs as text, so each file
         # part is sniffed and routed on its own (document -> document service, image -> image
         # service). The routed bytes are then removed from the body so the remaining fields are
         # analysed without the file content (a PDF's text was being scored by the WAF as an attack).
-        if direction == "outbound" and _doc_scan_mode() != "off":
+        if direction == "outbound" and (_doc_scan_mode() != "off" or _legacy_office_policy() == "block"):
             verdict, remaining = await self._inspect_upload_parts(headers, body, direction, src_ip, dst_ip,
                                                                   dst_port, host, method, path)
             if verdict == "block":
@@ -190,7 +202,10 @@ class IDPInspector:
                 return "allow", None
             for part in extract_file_parts(ctype, body, max_part_bytes=_doc_max_bytes()):
                 kind = FileSniffer.get_true_file_type(part.data)
-                if kind not in ("document", "image"):
+                if kind == "legacy_office" and _legacy_office_policy() == "block":
+                    logger.warning(f"BLOCK: uploaded legacy Office binary {part.filename!r} ({src_ip} -> {dst_ip}).")
+                    return "block", None
+                if kind not in ("document", "image") or _doc_scan_mode() == "off":
                     continue
                 logger.info(f"Inspecting uploaded {kind} part {part.filename!r} ({len(part.data)} bytes)")
                 v = await self.send_to_ai(kind, part.data, direction, src_ip, dst_ip, dst_port,
