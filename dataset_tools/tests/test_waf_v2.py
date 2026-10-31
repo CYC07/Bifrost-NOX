@@ -487,6 +487,24 @@ def test_holdout_file_contains_all_probes_and_realistic_benign_bodies(held):
     assert wrapped and all(r["label"] == "clean" for r in wrapped)
 
 
+def test_encoded_twin_of_a_training_payload_is_dropped_from_the_holdout(tmp_path, monkeypatch):
+    """The loader keeps a fuzzdb percent-encoded payload when patt already supplied its decoded form
+    (exact-text dedupe cannot see they are the same payload). Such near-twins must not be in the holdout."""
+    _stub_generators(monkeypatch)
+    root = _rich_root(tmp_path / "s")
+    (tmp_path / "s" / "fuzzdb" / "attack" / "sql-injection" / "twin.txt").write_text(
+        "%27%20OR%205%3D5--\n  ' or  5=5--  \nfzunique' OR 'x'='x\n")
+    out = tmp_path / "o"
+    rep = build.build(root, str(out), seed=7, n_clean=300, include_local_pools=False, holdout_source="fuzzdb")
+    hold = open(out / "test_holdout.jsonl").read()
+    assert "%27%20OR%205%3D5--" not in hold, "encoded twin of a training payload leaked into the holdout"
+    assert "fzunique" in hold, "a genuinely new fuzzdb payload must stay"
+    assert rep["holdout"]["dropped_near_twins"] >= 1
+    assert "near-twin" in open(out / "DATASET_CARD.md").read().lower()
+    for n in ("train.jsonl", "val.jsonl", "test.jsonl", "test_ood.jsonl"):
+        assert "%27%20OR%205%3D5--" not in open(out / n).read(), "dropped, not moved to training"
+
+
 def test_holdout_build_is_deterministic(tmp_path, monkeypatch):
     _stub_generators(monkeypatch)
     root = _rich_root(tmp_path / "s")

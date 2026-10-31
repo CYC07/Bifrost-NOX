@@ -132,6 +132,8 @@ python -m dataset_tools.waf.v2.gate --results waf_v2_results.json --artifact ml/
 | held-out benign bodies FP | <= 2% |
 | production replay: benign block rate / attack block rate | <= 10% / >= 90% |
 
+The `scanner` probe is excluded from the notebook's independent-probe gate (9 attacks, 8 needed; `scanner` is synthetic)
+but counted in the production replay (10 attack probes, 9 blocked needed): the replay measures what the gateway does.
 The limits live in one place (`GATES` in `dataset_tools/waf/v2/gate.py`); the notebook's cell 9 is generated from it.
 `--skip-replay` exists for unit tests only and the run then ends "PASS (INCOMPLETE ...)". To measure any artifact on the
 production path without a verdict: `--replay-only --artifact DIR --arm A [--threshold 0.8]`.
@@ -143,12 +145,16 @@ production path without a verdict: `--replay-only --artifact DIR --arm A [--thre
 | A (softmax) | the unzipped directory | `WAF_ATTACK_THRESHOLD=<recommended_threshold from waf_v2.json>` (text_service default is 0.8; `WAF_THRESHOLD` is not used there) |
 | B (sigmoid) | the unzipped directory | taken from `waf_v2.json`; `WAF_THRESHOLD` overrides it; `WAF_ATTACK_THRESHOLD` has **no effect** |
 
-Then re-run `tests/test_waf_scope.py tests/test_request_target.py tests/test_text_target.py`. Rollback = point
+Unset any old `WAF_THRESHOLD` before starting an Arm B deployment: it silently overrides the calibrated threshold (the
+effective threshold is printed in the `WAF model loaded from ...` log line). Then re-run
+`tests/test_waf_scope.py tests/test_request_target.py tests/test_text_target.py`. Rollback = point
 `WAF_MODEL_PATH` back at the v1 directory. A directory whose `waf_v2.json` is unreadable or inconsistent with the weights
 fails open (the WAF is disabled with a logged error), it is never guessed to be a softmax model.
 
-**What these gates cannot tell you.** The held-out source removes exact-duplicate leakage, not near-duplicates across
-repos; `ssti` and `scanner` have no (or only synthetic) held-out payloads, so their recall is unmeasured here; the
+**What these gates cannot tell you.** The held-out source is free of exact duplicates and of percent-decoded / re-cased /
+re-spaced twins of training payloads (those are dropped; the dataset card says how many), but not of looser paraphrases
+across repos; `ssti` and `scanner` have no (or only synthetic) held-out payloads and `path_traversal` has only a handful
+of unique held-out values, so those recalls are unmeasured here (xss is ~60% of the held-out attack rows); the
 independent probes and benign bodies are small hand-written sets (a 2% budget on ~135 clean rows is 2 rows); and every
 number is for the model's decision rule in isolation or in the replay - live traffic, other sensors in the gateway and
 latency are not covered.
