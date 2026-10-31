@@ -28,6 +28,7 @@ from ml.prompt_injection import signatures as pi_signatures
 from ml.prompt_injection.prompts import extract_prompts
 from common import llm_scope
 from ml.waf import target as request_target
+from ml.waf.gate import waf_gate_parts
 
 setup_logging("text_service")
 logger = logging.getLogger("text_service")
@@ -388,6 +389,13 @@ def _analyze_sync(text: str, in_scope: bool = False, direction: str = "outbound"
                 results.append(model_web_attack(text))
         elif route == "prose":
             results.append(model_sensitive(text))
+        # The router guesses the SHAPE of a body; injection payloads are often shaped like code
+        # or prose (`1 UNION SELECT ...`, shell one-liners, <script> blocks), so for route
+        # code/prose the WAF still looks at the lines carrying a strong injection marker.
+        if direction == "outbound" and route != "web_request" and not any(r.blocked for r in results):
+            gated = waf_gate_parts(text)
+            if gated:
+                results.append(model_web_attack("", parts=gated))
     # route == "code": secrets + PII + prompt-injection already cover the real
     # risk, skip the other two.
     return _aggregate(results, route)
