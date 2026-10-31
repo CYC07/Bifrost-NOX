@@ -21,6 +21,7 @@ from common.schemas import VerdictStatus, AggregatedVerdict, RiskLevel, Analysis
 from common.utils import setup_logging
 from ml.waf.predictor import WAFClassifier
 from ml.sensitive.predictor import SensitiveClassifier
+from ml.sensitive.evidence import find_evidence
 from ml.secrets.detector import detect as detect_secrets
 from ml.router.predictor import RouterClassifier
 from ml.prompt_injection.predictor import PromptInjectionClassifier
@@ -118,10 +119,11 @@ def model_sensitive(text):
     try:
         pred = sensitive_classifier.predict(text)
         if pred.blocked:
+            how = pred.reason + (f": {', '.join(pred.evidence)}" if pred.reason != "nli" and pred.evidence else "")
             return AnalysisResult(
                 module="sensitive",
                 score=pred.score,
-                findings=[f"Sensitive content: {pred.label} (risk={pred.risk}, conf={pred.score:.2f})"],
+                findings=[f"Sensitive content: {pred.label} (risk={pred.risk}, conf={pred.score:.2f}, via={how})"],
                 blocked=True,
                 risk=RiskLevel(pred.risk),
             )
@@ -129,6 +131,18 @@ def model_sensitive(text):
     except Exception as e:
         logger.error(f"Sensitive Error: {e}")
         return AnalysisResult(module="sensitive", score=0.0, findings=[])
+
+def _sensitive_for_direction(text, direction):
+    """Sensitive-content verdict, direction-aware. Outbound it can block (data leaving the network).
+    Inbound it is advisory: a server's own reply (its terms of service, a record it sends back to the
+    person it belongs to) is not exfiltration, and blocking it is a pure false positive. The finding
+    still reaches the dashboard as a WARN (CENSOR). SENSITIVE_INBOUND=block restores blocking."""
+    res = model_sensitive(text)
+    if res.blocked and direction != "outbound" and os.getenv("SENSITIVE_INBOUND", "advisory").strip().lower() != "block":
+        return AnalysisResult(module=res.module, score=res.score, findings=res.findings,
+                              blocked=False, risk=RiskLevel.LOW, raw_data={"advisory": True})
+    return res
+
 
 # Credentials that legitimately travel in requests/responses and URLs: JWTs (SSO callbacks, magic
 # links, every login API reply), client-side Google API keys, a generic password=. Reported as
@@ -414,8 +428,14 @@ def _analyze_sync(text: str, in_scope: bool = False, direction: str = "outbound"
             # source of false positives, so it doesn't run on them: availability first.
             if direction == "outbound":
                 results.append(model_web_attack(text))
-        elif route == "prose":
-            results.append(model_sensitive(text))
+        # The router guesses the SHAPE of a body, and a pay list ("Alice 142000, Bob 98000, ...,
+        # confidential") is shaped like a web request, so the sensitive analyzer also runs for any body
+        # that carries hard private-data evidence (confidentiality marking, ID number, pay list, ...)
+        # whatever the router said (outbound only: inbound the finding is advisory, so it is not worth an
+        # NLI pass on every API reply that mentions an account number). Ordinary web_request / code
+        # bodies still skip the NLI.
+        if not any(r.blocked for r in results) and (route == "prose" or (direction == "outbound" and find_evidence(text))):
+            results.append(_sensitive_for_direction(text, direction))
         # The router guesses the SHAPE of a body; injection payloads are often shaped like code
         # or prose (`1 UNION SELECT ...`, shell one-liners, <script> blocks), so for route
         # code/prose the WAF still looks at the lines carrying a strong injection marker.

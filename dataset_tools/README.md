@@ -19,6 +19,8 @@ dataset_tools/
 │   └── build_dataset.py  train.py
 ├── image/            # image-service evaluation corpus
 │   └── synth_cases.py
+├── sensitive/        # sensitive-content NLI analyzer: public-data eval set + offline rule sweep (no training)
+│   └── fetch.py  build_eval.py  nli_pool.py  features.py  sweep.py  baseline_report.py  (+ hypotheses.py, sweep_lib.py)
 └── tests/            # tests for the tools (conftest puts the repo and this folder on sys.path)
 ```
 
@@ -38,6 +40,14 @@ python -m dataset_tools.waf.build_dataset && python -m dataset_tools.waf.train &
 
 # Router
 python -m dataset_tools.router.build_dataset && python -m dataset_tools.router.train
+
+# Sensitive-content analyzer evaluation (public corpora -> ~/FYP/corpora/sens_*, one model process at a time; CPU-slow)
+python -I dataset_tools/sensitive/fetch.py                       # downloads (HF hub + git + local docs), writes SOURCE.txt per corpus
+python -I dataset_tools/sensitive/build_eval.py                  # -> ~/FYP/corpora/sens_eval/eval.jsonl (dev/test split by hash)
+python -I dataset_tools/sensitive/nli_pool.py --repo . --eval ~/FYP/corpora/sens_eval/eval.jsonl --out ~/FYP/corpora/sens_eval/pool_s1.jsonl --stage 1
+python -I dataset_tools/sensitive/features.py --repo .           # router + Presidio + secrets (needs ml/router/artifacts)
+python -I dataset_tools/sensitive/nli_pool.py --repo . --eval ~/FYP/corpora/sens_eval/eval.jsonl --out ~/FYP/corpora/sens_eval/pool_s2.jsonl --stage 2
+python -I dataset_tools/sensitive/baseline_report.py --repo . --split test ; python -I dataset_tools/sensitive/sweep.py --repo .
 
 # Tool tests (and the firewall's own image tests use image/synth_cases.py)
 python -m pytest dataset_tools/tests -q
