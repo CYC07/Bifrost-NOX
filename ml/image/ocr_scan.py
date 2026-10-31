@@ -22,7 +22,9 @@ import logging
 import re
 
 from common.schemas import AnalysisResult, RiskLevel
+from ml.image.ocr_tolerant import tolerant_findings
 from ml.secrets.detector import detect as detect_secrets
+from ml.secrets.patterns import PLACEHOLDER_VALUES
 
 logger = logging.getLogger("image_service")
 
@@ -43,6 +45,72 @@ _SENSITIVE_KEYWORDS = [
 _SSN_RE = re.compile(r"\b(?!000|666|9\d\d)(\d{3})-(?!00)\d{2}-(?!0000)\d{4}\b")
 
 
+# --- OCR-noise hardening (these only ever REDUCE blocking or recover a clear true positive) ---
+# Presidio's weakest SSN patterns (bare digit runs) score ~0.05 and fire on log
+# numbers/ids; real SSNs in dashed form are still caught by _SSN_RE below.
+_MIN_SSN_SCORE = 0.3
+
+# A vendor example key (AKIA...EXAMPLE) misread by OCR by 1-2 characters is still
+# the example key, not a leaked secret.
+_PLACEHOLDER_MAX_EDITS = 2
+
+# JWT whose base64 segments carry a few OCR errors: the strict validator in
+# ml.secrets rejects it, so recognise the shape + "decodes to mostly-printable JSON".
+_FUZZY_JWT_RE = re.compile(r"eyJ[A-Za-z0-9_-]{12,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{16,}")
+
+
+def _edit_distance_le(a: str, b: str, k: int) -> bool:
+    if abs(len(a) - len(b)) > k:
+        return False
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1] <= k
+
+
+def _near_placeholder(text: str, span: tuple) -> bool:
+    """True if the whole token around `span` is within a few edits of a vendor
+    placeholder (OCR may insert/drop characters, shifting the fixed-width match)."""
+    a, b = span
+    while a > 0 and (text[a - 1].isalnum() or text[a - 1] == "_"):
+        a -= 1
+    while b < len(text) and (text[b].isalnum() or text[b] == "_"):
+        b += 1
+    tok = text[a:b]
+    return any(_edit_distance_le(tok, p, _PLACEHOLDER_MAX_EDITS) for p in PLACEHOLDER_VALUES)
+
+
+def _b64_head_is_json(seg: str, n: int = 8) -> bool:
+    import base64
+    seg = seg[:n]
+    seg = seg[: len(seg) - len(seg) % 4]
+    try:
+        raw = base64.urlsafe_b64decode(seg)
+    except Exception:
+        return False
+    return raw.startswith(b"{\"") and all(32 <= c < 127 for c in raw)
+
+
+def _fuzzy_jwt(text: str) -> bool:
+    """OCR splits long tokens with spaces and injects stray glyphs, so collapse
+    whitespace / drop non-token glyphs per line and require JWT shape with two
+    base64 segments whose heads decode to JSON ('{"alg"...', '{"sub"...')."""
+    for line in text.splitlines():
+        i = line.find("eyJ")
+        if i < 0:
+            continue
+        cand = re.sub(r"[^A-Za-z0-9_.-]", "", line[i:].replace(")", "J").replace("]", "J"))
+        m = _FUZZY_JWT_RE.match(cand)
+        if m:
+            h, pl, _sig = m.group(0).split(".", 2)
+            if _b64_head_is_json(h) and _b64_head_is_json(pl):
+                return True
+    return False
+
+
 def _risk_index(level: RiskLevel) -> int:
     return list(RiskLevel).index(level)
 
@@ -61,6 +129,8 @@ def scan_ocr_text(text: str, presidio) -> AnalysisResult:
     # 1. Secrets (blocking, severity -> risk).
     try:
         for f in detect_secrets(text):
+            if _near_placeholder(text, f.span):
+                continue
             findings.append(f"Secret in image text: {f.kind} (severity={f.severity})")
             blocked = True
             sev = RiskLevel(f.severity)
@@ -73,6 +143,8 @@ def scan_ocr_text(text: str, presidio) -> AnalysisResult:
     # 2. Presidio PII.
     try:
         for res in presidio.analyze(text=text, entities=_PRESIDIO_ENTITIES, language="en"):
+            if res.entity_type == "US_SSN" and res.score < _MIN_SSN_SCORE:
+                continue
             findings.append(f"PII in image text: {res.entity_type} ({res.score:.2f})")
             if res.entity_type in _BLOCKING_PII:
                 blocked = True
@@ -81,6 +153,31 @@ def scan_ocr_text(text: str, presidio) -> AnalysisResult:
                 score = max(score, 0.9)
     except Exception as e:
         logger.error(f"OCR Presidio scan error: {e}")
+
+    # 2a. OCR-damaged prefixed tokens / key header / DB URL (see ocr_tolerant).
+    try:
+        have = " ".join(findings)
+        for kind, sev in tolerant_findings(text):
+            if kind in have:
+                continue
+            findings.append(f"Secret in image text: {kind} (severity={sev})")
+            blocked = True
+            if _risk_index(RiskLevel(sev)) > _risk_index(risk):
+                risk = RiskLevel(sev)
+            score = 1.0
+    except Exception as e:
+        logger.error(f"OCR tolerant scan error: {e}")
+
+    # 2b. OCR-damaged JWT (strict validator rejects it).
+    try:
+        if not any("JWT" in f for f in findings) and _fuzzy_jwt(text):
+            findings.append("Secret in image text: JWT (OCR-tolerant) (severity=high)")
+            blocked = True
+            if _risk_index(RiskLevel.HIGH) > _risk_index(risk):
+                risk = RiskLevel.HIGH
+            score = 1.0
+    except Exception as e:
+        logger.error(f"OCR JWT scan error: {e}")
 
     # 3. SSN regex fallback (Presidio-version gap).
     try:
