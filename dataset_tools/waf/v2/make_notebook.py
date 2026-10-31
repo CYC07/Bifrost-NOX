@@ -8,22 +8,51 @@ threshold picked from the validation clean FP budget, then judged against explic
 """
 from __future__ import annotations
 
+import inspect
 import json
 import os
+
+from dataset_tools.waf.v2 import gate
 
 HERE = os.path.dirname(__file__)
 OUT = os.path.abspath(os.path.join(HERE, "..", "train_v2.ipynb"))
 
+GATE_CELL_HEAD = """# 9. ship gates. GENERATED from dataset_tools/waf/v2/gate.py (GATES + gate_checks): do not edit here, edit the
+# repo and regenerate, so Colab and `python -m dataset_tools.waf.v2.gate` can never disagree. Decide the budgets
+# BEFORE looking at the numbers. The production-path replay (text_service, all models) runs offline in gate.py.
+import math
+GATES = %s
+
+"""
+
+GATE_CELL_TAIL = """
+
+PASS, CHECKS = {}, {}
+for k in ARMS:
+    CHECKS[k] = gate_checks(dict(test=R[k]["test"], ood=R[k]["ood"], holdout=R[k]["holdout"], ind=IND[k]), GATES)
+    PASS[k] = all(ok for _, ok, _ in CHECKS[k])
+    print(f"== {k}: {'NOTEBOOK GATES PASS (run gate.py for the production replay)' if PASS[k] else 'FAILS GATES'}")
+    for name, ok, detail in CHECKS[k]:
+        print("   ", "PASS" if ok else "FAIL", name, f"[{detail}]")"""
+
+
+def gate_cell() -> str:
+    gates = {k: gate.GATES[k] for k in gate.NOTEBOOK_GATE_KEYS}
+    return GATE_CELL_HEAD % json.dumps(gates, indent=1) + inspect.getsource(gate.gate_checks).rstrip("\n") + GATE_CELL_TAIL
+
+
 MD_INTRO = """# Bifrost NØX — WAF v2 bake-off (Colab, GPU runtime)
 
 Trains two DistilBERT arms on `dataset_v2.zip` (shape-balanced: clean and attack values share the same
-carrier templates, splits are by payload group, two shapes are held out for OOD tests) and judges them
-against **ship gates** (FP budget on clean traffic, recall, OOD recall, an independent hand-written battery).
+carrier templates, splits are by payload group, two shapes are held out for OOD tests, and one whole payload
+SOURCE is held out in `test_holdout.jsonl`) and judges them against **ship gates** (FP budget on clean traffic,
+recall, OOD recall, recall on the held-out payload source, an independent hand-written battery).
 
 * **Arm A** – 7-class softmax, identical to v1's head, so it is a drop-in for `ml/waf/predictor.py`.
-* **Arm B** – one sigmoid head per attack family, default-allow (needs a predictor change to ship).
+* **Arm B** – one sigmoid head per attack family, default-allow (`ml/waf/predictor.py` loads it from `waf_v2.json`).
 
-Runtime → *Change runtime type → T4 GPU*, then run all cells. Upload `dataset_v2.zip` when asked.
+Runtime → *Change runtime type → T4 GPU*, then run all cells. Upload `dataset_v2.zip` when asked - it MUST be a zip
+built with `--holdout-source` (it contains `test_holdout.jsonl`); the notebook stops otherwise.
 Nothing here uses lab traffic. `scanner` is tiny/synthetic and is excluded from the gates."""
 
 CELLS = [
@@ -37,9 +66,17 @@ up = files.upload()                      # dataset_v2.zip
 zipfile.ZipFile(next(iter(up))).extractall("/content/v2")
 def load(n): return [json.loads(l) for l in open(f"/content/v2/{n}.jsonl")]
 train, val, test, ood = (load(n) for n in ("train", "val", "test", "test_ood"))
+assert os.path.exists("/content/v2/test_holdout.jsonl"), (
+    "this dataset_v2.zip has no test_holdout.jsonl - rebuild with `python -m dataset_tools.waf.v2.build --holdout-source fuzzdb` "
+    "and upload THAT zip (a default-build zip would silently skip the source-independent gates)")
+holdout = load("test_holdout")
+hold = [r for r in holdout if r["shape"] != "probe"]           # held-out-source attacks + realistic benign bodies
+probe_rows = [r for r in holdout if r["shape"] == "probe"]     # the 25 hand-written probes (independent battery)
+assert any(r["label"] != "clean" for r in hold), "test_holdout.jsonl has no held-out-source attack rows"
+assert len(probe_rows) >= 20, "test_holdout.jsonl is missing the hand-written probes"
 LABELS = ["clean", "sqli", "xss", "path_traversal", "command_injection", "ssti", "scanner"]   # == ml/waf/taxonomy.py
 ATTACKS = LABELS[1:]
-print({k: len(v) for k, v in dict(train=train, val=val, test=test, ood=ood).items()})
+print({k: len(v) for k, v in dict(train=train, val=val, test=test, ood=ood, hold=hold, probes=probe_rows).items()})
 print(open("/content/v2/DATASET_CARD.md").read()[:1500])'''),
 ("code", r'''# 3. shared setup
 import numpy as np, torch
@@ -111,14 +148,16 @@ def pick_threshold(fn):
     return float(np.quantile(flag, 1 - FP_BUDGET))
 THR = {k: pick_threshold(f) for k, f in ARMS.items()}
 print("thresholds from val clean FP budget:", THR)'''),
-("code", r'''# 7. evaluate both arms on test / OOD
+("code", r'''# 7. evaluate both arms on test / OOD / the held-out payload source
 import collections
 def evaluate(name, rows, fn, thr):
     flag, pred = fn([r["text"] for r in rows]); flagged = flag > thr
     clean = [i for i, r in enumerate(rows) if r["label"] == "clean"]
     att = [i for i, r in enumerate(rows) if r["label"] not in ("clean", "scanner")]
-    fp = float(np.mean([flagged[i] for i in clean])); rec = float(np.mean([flagged[i] for i in att]))
-    exact = float(np.mean([flagged[i] and pred[i] == rows[i]["label"] for i in att]))
+    nan = float("nan")
+    fp = float(np.mean([flagged[i] for i in clean])) if clean else nan
+    rec = float(np.mean([flagged[i] for i in att])) if att else nan
+    exact = float(np.mean([flagged[i] and pred[i] == rows[i]["label"] for i in att])) if att else nan
     by_shape = collections.defaultdict(list)
     for i in clean: by_shape[rows[i]["shape"]].append(flagged[i])
     shape_fp = {s: float(np.mean(v)) for s, v in by_shape.items()}
@@ -126,65 +165,30 @@ def evaluate(name, rows, fn, thr):
     for lab in ATTACKS:
         idx = [i for i, r in enumerate(rows) if r["label"] == lab]
         if idx: per_class[lab] = round(float(np.mean([flagged[i] for i in idx])), 3)
-    return dict(fp=fp, recall=rec, exact=exact, shape_fp=shape_fp, per_class_recall=per_class)
+    return dict(fp=fp, recall=rec, exact=exact, n_clean=len(clean), n_attack=len(att), shape_fp=shape_fp,
+                per_class_recall=per_class)
 R = {}
 for k, fn in ARMS.items():
-    R[k] = {"test": evaluate(k, test, fn, THR[k]), "ood": evaluate(k, ood, fn, THR[k])}
-    for split in ("test", "ood"):
+    R[k] = {"test": evaluate(k, test, fn, THR[k]), "ood": evaluate(k, ood, fn, THR[k]),
+            "holdout": evaluate(k, hold, fn, THR[k])}
+    for split in ("test", "ood", "holdout"):
         r = R[k][split]
-        print(f"{k:11s} {split:4s} clean-FP {r['fp']:.2%}  recall {r['recall']:.2%} (exact class {r['exact']:.2%})")
+        print(f"{k:11s} {split:7s} clean-FP {r['fp']:.2%} (n={r['n_clean']})  recall {r['recall']:.2%} (n={r['n_attack']}, exact class {r['exact']:.2%})")
         print("            FP by shape:", {s: f"{v:.1%}" for s, v in sorted(r['shape_fp'].items())})
         print("            recall by class:", r["per_class_recall"])'''),
-("code", r'''# 8. independent hand-written battery (never in any generator)
-BENIGN = {
- "json login (alice)": json.dumps({"username": "alice", "password": "hunter2"}),
- "json login (email)": json.dumps({"email": "bob@example.com", "password": "S3cure!pass"}),
- "json register": json.dumps({"name": "Carol", "email": "c@example.com", "password": "pw123456", "age": 31}),
- "json search": json.dumps({"query": "best pizza near me", "page": 2}),
- "json token refresh": json.dumps({"refresh_token": "abc123def456", "grant_type": "refresh_token"}),
- "json telemetry": json.dumps({"deviceId": "abc123", "events": [{"t": 1, "n": "heartbeat"}]}),
- "form login": "username=admin&password=secret123&remember=true",
- "form search": "q=best pizza near me&sort=popularity",
- "form contact": "first_name=Michael&last_name=Chen&company=Acme%20Corp",
- "name with apostrophe": json.dumps({"name": "Conan O'Brien"}),
- "url value": json.dumps({"next": "https://example.com/account?tab=billing&id=42"}),
- "prose with sql words": "Please select your plan, then drop us a line or update your profile.",
- "plain prose": "Please contact our support team if you have any questions.",
-}
-ATTACK = {
- "sqli or": "id=1' OR '1'='1' --", "sqli union": "id=1 UNION SELECT username, password FROM users--",
- "sqli json": json.dumps({"username": "admin' OR '1'='1' --", "password": "x"}),
- "xss script": "q=<script>alert(document.cookie)</script>", "xss img": "name=<img src=x onerror=alert(1)>",
- "traversal": "file=../../../../etc/passwd", "cmdi": "host=127.0.0.1; cat /etc/passwd",
- "cmdi json": json.dumps({"ip": "8.8.8.8 && whoami"}), "ssti": "name={{7*7}}{{config.items()}}",
-}
+("code", r'''# 8. independent hand-written battery: the 25 probes in test_holdout.jsonl (shape "probe"; never in any generator)
+BENIGN = {r["name"]: r["text"] for r in probe_rows if r["label"] == "clean"}
+ATTACK = {r["name"]: r["text"] for r in probe_rows if r["label"] not in ("clean", "scanner")}     # scanner: excluded from gates
+assert len(BENIGN) >= 10 and len(ATTACK) >= 5, "probe rows missing from test_holdout.jsonl"
 IND = {}
 for k, fn in ARMS.items():
     fb, _ = fn(list(BENIGN.values())); fa, _ = fn(list(ATTACK.values()))
-    IND[k] = dict(benign_fp=int((fb > THR[k]).sum()), attacks_caught=int((fa > THR[k]).sum()))
+    IND[k] = dict(benign_fp=int((fb > THR[k]).sum()), attacks_caught=int((fa > THR[k]).sum()),
+                  n_benign=len(BENIGN), n_attack=len(ATTACK))
     wrong = [n for n, f in zip(BENIGN, fb) if f > THR[k]]
     missed = [n for n, f in zip(ATTACK, fa) if f <= THR[k]]
     print(k, IND[k], "| benign flagged:", wrong, "| attacks missed:", missed)'''),
-("code", r'''# 9. ship gates (edit the budgets if you disagree, but decide BEFORE looking at the numbers)
-GATES = dict(test_fp=0.01, shape_fp=0.03, recall=0.90, ood_fp=0.02, ood_recall=0.80,
-             ind_benign_fp=len(BENIGN) // 5, ind_attacks=len(ATTACK) - 1)
-def gate_report(k):
-    t, o, i = R[k]["test"], R[k]["ood"], IND[k]
-    checks = {
-        f"test clean FP <= {GATES['test_fp']:.0%}": t["fp"] <= GATES["test_fp"],
-        f"worst shape clean FP <= {GATES['shape_fp']:.0%}": max(t["shape_fp"].values()) <= GATES["shape_fp"],
-        f"test recall >= {GATES['recall']:.0%}": t["recall"] >= GATES["recall"],
-        f"OOD clean FP <= {GATES['ood_fp']:.0%}": o["fp"] <= GATES["ood_fp"],
-        f"OOD recall >= {GATES['ood_recall']:.0%}": o["recall"] >= GATES["ood_recall"],
-        f"independent benign FP <= {GATES['ind_benign_fp']}": i["benign_fp"] <= GATES["ind_benign_fp"],
-        f"independent attacks caught >= {GATES['ind_attacks']}": i["attacks_caught"] >= GATES["ind_attacks"],
-    }
-    return checks
-PASS = {}
-for k in ARMS:
-    c = gate_report(k); PASS[k] = all(c.values())
-    print(f"== {k}: {'SHIP-READY' if PASS[k] else 'FAILS GATES'}")
-    for name, ok in c.items(): print("   ", "PASS" if ok else "FAIL", name)'''),
+("code", gate_cell()),
 ("code", r'''# 10. export (Arm A is the drop-in). Also exports B for the record.
 import shutil, hashlib
 def export(model, name, extra):
@@ -195,15 +199,19 @@ def export(model, name, extra):
     print(name, "sha256", h); return f"{d}.zip"
 za = export(model_a, "waf_distilbert_v2", dict(arm="A_softmax7", recommended_threshold=THR["A_softmax7"], gates=PASS["A_softmax7"]))
 zb = export(model_b, "waf_sigmoid_v2", dict(arm="B_sigmoid6", recommended_threshold=THR["B_sigmoid6"], gates=PASS["B_sigmoid6"]))
-json.dump(dict(R=R, IND=IND, THR=THR, PASS=PASS), open("/content/waf_v2_results.json", "w"), indent=1, default=float)
+json.dump(dict(R=R, IND=IND, THR=THR, PASS=PASS, CHECKS=CHECKS), open("/content/waf_v2_results.json", "w"), indent=1, default=float)
 from google.colab import files
 for f in (za, zb, "/content/waf_v2_results.json"): files.download(f)'''),
-("md", """## After download
-1. Keep the current model as `ml/waf/artifacts/waf_distilbert_v1` (rollback).
-2. Unzip `waf_distilbert_v2.zip` to `ml/waf/artifacts/waf_distilbert` and set `WAF_THRESHOLD` to `recommended_threshold`.
-3. Re-run: `tests/test_waf_scope.py tests/test_request_target.py tests/test_text_target.py`, then the VM battery
-   (`vm-lab/fw_tests3.ps1`, 30 checks, 0 mismatches). Convert the strict xfail on URL/apostrophe values to a normal test.
-4. Record the zip's sha256 (printed above) in the README: artifacts are not in git."""),
+("md", """## After download (full steps: dataset_tools/waf/README.md, "Running the v2 bake-off")
+1. Keep the current model as `ml/waf/artifacts/waf_distilbert_v1` (rollback). Unzip the arm you want to judge into its own
+   directory (e.g. `ml/waf/artifacts/waf_distilbert_v2` or `waf_sigmoid_v2`) - do NOT overwrite the shipping directory yet.
+2. Judge it: `python -m dataset_tools.waf.v2.gate --results waf_v2_results.json --artifact ml/waf/artifacts/<dir>`
+   (recomputes every gate from the raw numbers and replays the probes through `text_service`; non-zero exit = do not ship).
+3. Only if it passes: point `WAF_MODEL_PATH` at the directory. Arm A: also set `WAF_ATTACK_THRESHOLD` (what `text_service`
+   reads) to `recommended_threshold`. Arm B: the threshold comes from `waf_v2.json`; `WAF_THRESHOLD` overrides it,
+   `WAF_ATTACK_THRESHOLD` has no effect.
+4. Re-run `tests/test_waf_scope.py tests/test_request_target.py tests/test_text_target.py`, then the VM battery
+   (`vm-lab/fw_tests3.ps1`, 30 checks, 0 mismatches). Record the zip's sha256 (printed above) in the README: artifacts are not in git."""),
 ]
 
 
