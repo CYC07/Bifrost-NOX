@@ -5,6 +5,13 @@
 Writes train/val/test/test_ood JSONL (+ DATASET_CARD.md and dataset_v2.zip). Every value (clean or
 attack) goes through the same shape recipe; splits are by payload group (no value in two splits);
 HELD_OUT shapes appear only in test_ood, built from test-group values.
+
+With ``--holdout-source fuzzdb`` a whole payload SOURCE is held out: train/val/test/test_ood contain no
+payload from it, and a separate ``test_holdout.jsonl`` holds only those payloads (wrapped in the
+training shapes) plus the hand-written probes and realistic benign bodies of ``probes.py``. That file
+measures generalisation to payloads the model's corpus never contained, which the group-hash split alone
+cannot (near-identical payloads from one repo land in train and test). Without the flag the output is
+byte-identical to what this builder wrote before the flag existed.
 """
 from __future__ import annotations
 
@@ -17,12 +24,14 @@ import zipfile
 from collections import Counter
 
 from ml.waf.taxonomy import LABELS
-from dataset_tools.waf.v2 import benign, payloads, shapes
+from dataset_tools.waf.v2 import benign, payloads, probes, shapes
 
 _HERE = os.path.dirname(__file__)
 DATA_DIR = os.path.abspath(os.path.join(_HERE, "..", "data"))
 MAX_TEXT = 2048
 EXTRA_SHAPES_PER_VALUE = 2
+HOLDOUT_FILE = "test_holdout.jsonl"
+_HOLDOUT_SEED_OFFSET = 7919       # the holdout wrapping has its own RNG stream; the main one is untouched
 
 
 def _group(text: str) -> str:
@@ -89,22 +98,49 @@ def _denied(text: str, denylist) -> bool:
     return any(d and d.lower() in low for d in denylist)
 
 
+def _parse_holdout(holdout_source) -> tuple[str, ...]:
+    """'fuzzdb' / 'fuzzdb,seclists' / ['fuzzdb'] -> ('fuzzdb',); None/'' -> ()."""
+    if not holdout_source:
+        return ()
+    items = holdout_source.split(",") if isinstance(holdout_source, str) else list(holdout_source)
+    return tuple(i.strip() for i in items if i and i.strip())
+
+
+def _source_of(rec: dict) -> str:
+    return rec["source"].split(":")[0]
+
+
 def build(root: str, out_dir: str, seed: int = 42, n_clean: int = 36000, cap_per_attack: int = 9000,
-          include_local_pools: bool = True, denylist: tuple = ()) -> dict:
+          include_local_pools: bool = True, denylist: tuple = (), holdout_source=None) -> dict:
     rng = random.Random(seed)
     os.makedirs(out_dir, exist_ok=True)
+    holdout = _parse_holdout(holdout_source)
+    stale = os.path.join(out_dir, HOLDOUT_FILE)
+    if not holdout and os.path.exists(stale):
+        os.remove(stale)         # a leftover from an earlier holdout build must not end up in this zip
 
     attacks = payloads.load_attacks(root) + payloads.scanner_probes() + payloads.synth_ssti()
     if include_local_pools:
         attacks += _local_attacks()
     by_label: dict[str, list[dict]] = {}
     seen: set[str] = set()
+    if holdout:
+        # hand-written probes / benign bodies are evaluation-only: no generator may emit them
+        seen.update(t.lower() for t in probes.all_texts())
     for r in attacks:
         t = r["text"]
         if _denied(t, denylist) or len(t) > MAX_TEXT or t.lower() in seen:
             continue
         seen.add(t.lower())
         by_label.setdefault(r["label"], []).append(r)
+    held: list[dict] = []
+    if holdout:
+        for label in list(by_label):
+            held += [r for r in by_label[label] if _source_of(r) in holdout]
+            by_label[label] = [r for r in by_label[label] if _source_of(r) not in holdout]
+        if not held:
+            raise ValueError(f"--holdout-source {','.join(holdout)}: no payload from that source "
+                             f"(sources present: {sorted({_source_of(r) for r in attacks})})")
     values: list[tuple[str, str, str]] = []
     for label, recs in by_label.items():
         rng.shuffle(recs)
@@ -152,11 +188,18 @@ def build(root: str, out_dir: str, seed: int = 42, n_clean: int = 36000, cap_per
                 splits["test_ood"].append({"text": wrapped, "label": label, "source": source, "shape": oshape, "group": g})
     for recs in splits.values():
         rng.shuffle(recs)
+    if holdout:
+        splits["test_holdout"] = _holdout_rows(held, seed, denylist, cap_per_attack)
 
     report = {"seed": seed, "counts": {k: len(v) for k, v in splits.items()},
               "labels": {k: dict(Counter(r["label"] for r in v)) for k, v in splits.items()},
               "shapes_train": dict(Counter(r["shape"] for r in splits["train"])),
               "sources": dict(Counter(r["source"].split(":")[0] for r in splits["train"]))}
+    if holdout:
+        report["holdout"] = {"source": list(holdout),
+                             "attack_labels": dict(Counter(r["label"] for r in splits["test_holdout"]
+                                                           if r["source"].split(":")[0] in holdout)),
+                             "shapes": dict(Counter(r["shape"] for r in splits["test_holdout"]))}
     for name, recs in splits.items():
         with open(os.path.join(out_dir, f"{name}.jsonl"), "w", encoding="utf-8") as f:
             for r in recs:
@@ -164,6 +207,43 @@ def build(root: str, out_dir: str, seed: int = 42, n_clean: int = 36000, cap_per
     with open(os.path.join(out_dir, "DATASET_CARD.md"), "w", encoding="utf-8") as f:
         f.write(_card(report))
     return report
+
+
+def _holdout_rows(held: list[dict], seed: int, denylist, cap_per_attack: int) -> list[dict]:
+    """test_holdout rows: held-out-source payloads in the TRAINING shapes only (so a failure is source
+    shift, not shape shift), the hand-written probes as-is, and each realistic benign body natively
+    plus in the same two-extra-shapes recipe. Own RNG: the main build's stream is not consumed."""
+    rng = random.Random(seed + _HOLDOUT_SEED_OFFSET)
+    rows: list[dict] = []
+
+    def add(text, label, source, shape, group_of, name=None):
+        # group = hash of the carried VALUE (as in the main splits), not of the wrapped string
+        if len(text) > MAX_TEXT or _denied(text, denylist):
+            return
+        row = {"text": text, "label": label, "source": source, "shape": shape, "group": _group(group_of)}
+        if name:
+            row["name"] = name
+        rows.append(row)
+
+    by_label: dict[str, list[dict]] = {}
+    for r in sorted(held, key=lambda r: (r["label"], r["text"])):
+        by_label.setdefault(r["label"], []).append(r)
+    for label in sorted(by_label):
+        recs = by_label[label]
+        rng.shuffle(recs)
+        for r in recs[:cap_per_attack]:
+            for shape in ["bare"] + rng.sample(shapes.TRAIN_SHAPES, EXTRA_SHAPES_PER_VALUE):
+                add(shapes.SHAPES[shape](r["text"], rng), r["label"], r["source"], shape, r["text"])
+    for name, label, text in probes.PROBES:
+        add(text, label, "handwritten:waf_probe", "probe", text, name)
+    for name, text in probes.REALISTIC_BENIGN:
+        add(text, "clean", "handwritten:benign_bodies", "native", text, name)
+        for shape in rng.sample(shapes.TRAIN_SHAPES, EXTRA_SHAPES_PER_VALUE):
+            wrapped = shapes.SHAPES[shape](text, rng)
+            if wrapped != text:
+                add(wrapped, "clean", "handwritten:benign_bodies", shape, text, name)
+    rng.shuffle(rows)
+    return rows
 
 
 def _card(rep: dict) -> str:
@@ -182,13 +262,25 @@ def _card(rep: dict) -> str:
              "- Kaggle archive.zip (payload_full.csv) was NOT used (needs credentials); public repos replace it.",
              "- Clean values are synthetic (Faker + hand-written hard negatives) plus local public URL pools.",
              "- No captured lab traffic is included."]
+    if "holdout" in rep:
+        h = rep["holdout"]
+        lines += ["", "## Held-out source",
+                  f"Source(s) held out: {', '.join(h['source'])}. No payload from them is in train/val/test/test_ood;",
+                  "`test_holdout.jsonl` holds only those payloads (bare + two training shapes), plus hand-written",
+                  "probes (shape `probe`) and realistic benign bodies (`handwritten:benign_bodies`).",
+                  "Attack rows by label: " + json.dumps(h["attack_labels"], sort_keys=True),
+                  "Rows by shape: " + json.dumps(h["shapes"], sort_keys=True),
+                  "Only the clean rows of this file are independent of the training generators."]
     return "\n".join(lines) + "\n"
 
 
 def make_zip(out_dir: str, zip_path: str | None = None) -> str:
     zip_path = zip_path or os.path.join(out_dir, "dataset_v2.zip")
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
-        for n in ("train.jsonl", "val.jsonl", "test.jsonl", "test_ood.jsonl", "DATASET_CARD.md"):
+        names = ["train.jsonl", "val.jsonl", "test.jsonl", "test_ood.jsonl", "DATASET_CARD.md"]
+        if os.path.exists(os.path.join(out_dir, HOLDOUT_FILE)):
+            names.insert(4, HOLDOUT_FILE)
+        for n in names:
             z.write(os.path.join(out_dir, n), n)
     return zip_path
 
@@ -199,11 +291,14 @@ def main() -> None:
     ap.add_argument("--out", default=os.path.join(DATA_DIR, "build_v2"))
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--n-clean", type=int, default=36000)
+    ap.add_argument("--holdout-source", default=None,
+                    help="payload source to hold out entirely (repo prefix of the record source, e.g. fuzzdb); "
+                         "writes test_holdout.jsonl and keeps that source out of every other split")
     ap.add_argument("--denylist", default=os.environ.get("WAF_V2_DENYLIST", ""),
                     help="comma-separated terms; any record containing one is dropped")
     a = ap.parse_args()
     deny = tuple(t.strip() for t in a.denylist.split(",") if t.strip())
-    rep = build(a.root, a.out, seed=a.seed, n_clean=a.n_clean, denylist=deny)
+    rep = build(a.root, a.out, seed=a.seed, n_clean=a.n_clean, denylist=deny, holdout_source=a.holdout_source)
     print(json.dumps(rep, indent=1))
     print("zip:", make_zip(a.out))
 
