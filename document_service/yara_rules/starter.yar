@@ -66,9 +66,10 @@ rule PDF_Embedded_Executable
         $pdf = "%PDF"
         $emb = /\/EmbeddedFile([^A-Za-z0-9_.#-]|$)/
         // MZ alone matches random binary data; require the DOS stub / PE signature.
-        $pe_stub = /MZ[\x00-\xff]{30,400}PE\x00\x00/
+        $pe_stub = /MZ[\x00-\xff]{58}[\x40-\xf8]\x00\x00\x00[\x00-\xff]{0,248}PE\x00\x00/
         $dos_msg = "This program cannot be run in DOS mode"
-        $elf = { 7F 45 4C 46 0? 0? 01 }
+        // ELF ident: class, data, version=1, OSABI, ABI version, 7 zero pad bytes
+        $elf = { 7F 45 4C 46 (01|02) (01|02) 01 ?? ?? 00 00 00 00 00 00 00 }
     condition:
         $pdf in (0..1024) and $emb and ($pe_stub or $dos_msg or $elf)
 }

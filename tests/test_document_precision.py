@@ -28,6 +28,9 @@ def _warm():
     content_model.load_model()
 
 
+REAL_PE = b"MZ\x90\x00" + b"\x00" * 56 + b"\x40\x00\x00\x00" + b"PE\x00\x00" + b"\x41" * 300  # e_lfanew=0x40
+
+
 def verdict(data: bytes):
     rs = [
         structure_model.analyze(data),
@@ -158,7 +161,7 @@ def test_openaction_submitform_to_executable_is_hard_flagged():
 
 
 def test_embedded_pe_attachment_flagged_even_when_compressed():
-    pe = b"MZ\x90\x00" + b"\x00" * 56 + b"PE\x00\x00" + b"\x41" * 300
+    pe = REAL_PE
     doc = fitz.open()
     doc.new_page()
     doc.embfile_add("update.exe", pe)
@@ -168,7 +171,7 @@ def test_embedded_pe_attachment_flagged_even_when_compressed():
 
 
 def test_embedded_pe_raw_bytes_yara():
-    pe = b"MZ\x90\x00" + b"\x00" * 56 + b"PE\x00\x00" + b"\x41" * 300
+    pe = REAL_PE
     raw = raw_pdf("/Names << /EmbeddedFiles << /Names [(a.exe) 4 0 R] >> >>",
                   "4 0 obj\n<< /Type /EmbeddedFile /Length 100 >>\nstream\n" + pe.decode("latin-1") + "\nendstream\nendobj\n")
     assert asyncio.run(malware_model.analyze(raw)).score >= 0.9
@@ -261,3 +264,51 @@ def test_metadata_path_leak_alone_never_blocks():
     data = doc.tobytes()
     doc.close()
     assert not blocked(data)
+
+
+# ------------------------------------------------ coincidental stream bytes
+
+
+def _pdf_with_stream(catalog_extra: str, stream: bytes, dict_extra: str = "") -> bytes:
+    head = f"%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R {catalog_extra} >>\nendobj\n"
+    head += "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n"
+    head += "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>\nendobj\n"
+    head += f"5 0 obj\n<< /Length {len(stream)} {dict_extra} >>\nstream\n"
+    return head.encode("latin-1") + stream + b"\nendstream\nendobj\ntrailer\n<< /Root 1 0 R /Size 20 >>\n%%EOF\n"
+
+
+def test_coincidental_js_aa_bytes_inside_stream_with_plain_openaction_not_blocked():
+    import random
+
+    rng = random.Random(7)
+    noise = bytes(rng.randrange(256) for _ in range(200_000))
+    stream = noise + b"\xe4/JS\xe2\xb9" + noise[:5000] + b"\x91/AA\x04\x92" + b"/JavaScript\x01/Launch\x02"
+    data = _pdf_with_stream("/OpenAction [3 0 R /Fit]", stream)
+    v, m = verdict(data)
+    assert not blocked(data), v
+    assert m["malware"].score == 0.0
+
+
+def test_true_positive_twin_js_action_wired_to_openaction_still_blocked():
+    data = _pdf_with_stream("/OpenAction 4 0 R", b"\x00\x01\x02" * 1000) + b""
+    data = data.replace(b"trailer", b"4 0 obj\n<< /S /JavaScript /JS (app.alert(1)) >>\nendobj\ntrailer", 1)
+    assert blocked(data)
+    assert asyncio.run(malware_model.analyze(data)).score >= 0.9
+
+
+def test_random_stream_bytes_never_trigger_any_byte_level_rule():
+    import random
+
+    rng = random.Random(1234)
+    frags = [b"MZ", b"PE\x00\x00", b"\x7fELF", b"\x7fELF\x02\x01", b"/JS", b"/AA", b"/Launch",
+             b"/OpenAction", b"/JavaScript", b"X5O!P%@AP", b"This program"]
+    for _ in range(2000):
+        n = rng.randrange(256, 6000)
+        buf = bytearray(rng.randrange(256) for _ in range(n))
+        for _ in range(rng.randrange(0, 8)):
+            f = rng.choice(frags)
+            i = rng.randrange(0, n)
+            buf[i:i + len(f)] = f
+        data = _pdf_with_stream("/OpenAction [3 0 R /Fit]", bytes(buf), "/Type /EmbeddedFile /Filter /FlateDecode")
+        r = asyncio.run(malware_model.analyze(data))
+        assert r.score == 0.0, (r.findings, bytes(buf)[:80])

