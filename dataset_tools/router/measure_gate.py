@@ -29,6 +29,8 @@ def main() -> None:
     ap.add_argument("--dump", default="")
     ap.add_argument("--oracle", action="store_true", help="ceiling: WAF runs on every outbound body (router forced to web_request)")
     ap.add_argument("--no-gate", action="store_true", help="baseline: disable the marker gate")
+    ap.add_argument("--sets", default="attack,stress,benign")
+    ap.add_argument("--reps", type=int, default=1, help="time each body this many times, keep the min (idle-process latency)")
     a = ap.parse_args()
     from text_service import main as svc
     asyncio.run(svc.load_models())
@@ -44,16 +46,23 @@ def main() -> None:
     lat = {}
     dump = {}
     for name, rows in (("attack", atk), ("stress", stress), ("benign", ben)):
+        if name not in a.sets.split(","):
+            continue
         routes = collections.Counter()
         blocked = 0
         per = collections.defaultdict(lambda: [0, 0])
+        shp = collections.defaultdict(lambda: [0, 0])
         times = []
         miss = []
         blocks = []
         for r in rows:
-            t0 = time.perf_counter()
-            o = svc._analyze_sync(r["text"], False, "outbound")
-            times.append((time.perf_counter() - t0) * 1000)
+            best = None
+            for _ in range(max(1, a.reps)):
+                t0 = time.perf_counter()
+                o = svc._analyze_sync(r["text"], False, "outbound")
+                dt = (time.perf_counter() - t0) * 1000
+                best = dt if best is None else min(best, dt)
+            times.append(best)
             route = (o.get("detailed_findings") or {}).get("route")
             routes[route] += 1
             b = blk(o)
@@ -62,13 +71,17 @@ def main() -> None:
             key = (r.get("label") if name == "attack" else r.get("shape") if name == "stress" else r.get("kind"))
             per[key][0] += b
             per[key][1] += 1
+            if name == "attack":
+                shp[r.get("shape")][0] += b
+                shp[r.get("shape")][1] += 1
             if (name != "benign") != b:
                 miss.append({"text": r["text"][:200], "route": route, "key": key})
         dump[name + "_times"] = list(times)
         dump[name + "_blocked"] = [bool(x) for x in blocks]
         times.sort()
         res[name] = {"n": len(rows), "blocked": blocked, "rate": round(blocked / len(rows), 4),
-                     "routes": dict(routes), "by_key": {k: f"{v[0]}/{v[1]}" for k, v in sorted(per.items())}}
+                     "routes": dict(routes), "by_key": {k: f"{v[0]}/{v[1]}" for k, v in sorted(per.items())},
+                     "by_shape": {k: f"{v[0]}/{v[1]}" for k, v in sorted(shp.items())}}
         lat[name] = {"p50": round(times[len(times) // 2], 1), "p95": round(times[int(len(times) * .95)], 1)}
         dump[name] = miss
     res["latency_ms"] = lat

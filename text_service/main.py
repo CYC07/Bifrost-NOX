@@ -215,6 +215,9 @@ def model_patterns(text, direction="outbound"):
 
 WAF_MAX_VALUES = int(os.getenv("WAF_MAX_VALUES", "64"))
 WAF_MAX_VALUE_CHARS = int(os.getenv("WAF_MAX_VALUE_CHARS", "2000"))
+# decoded form values shown to the model per body (each costs one WAF inference; the raw text is
+# always scored too, so padding a body with fields cannot hide a payload from the raw pass)
+WAF_MAX_FORM_VALUES = int(os.getenv("WAF_MAX_FORM_VALUES", "16"))
 
 
 def _waf_inputs(text: str) -> list[str]:
@@ -224,7 +227,7 @@ def _waf_inputs(text: str) -> list[str]:
     while the individual values are judged on their content. Anything else is scored whole."""
     s = text.lstrip()
     if not s.startswith(("{", "[")):
-        return [text[:WAF_MAX_VALUE_CHARS]]
+        return _form_inputs(text)
     try:
         obj = json.loads(text)
     except Exception:  # noqa: BLE001 — malformed JSON: fall back to the whole text
@@ -245,6 +248,30 @@ def _waf_inputs(text: str) -> list[str]:
             if v:
                 out.append(v[:WAF_MAX_VALUE_CHARS])
     walk(obj)
+    return out
+
+
+def _form_inputs(text: str) -> list[str]:
+    """Raw text first (unchanged behaviour), then what a server would actually see. A key=value&...
+    body (or `/path?k=v`) contributes its percent-decoded values; any other text with %XX escapes
+    contributes its decoded form. Only attack-shaped decoded values reach the model
+    (ml/waf/target.py worth_scoring), which keeps ordinary form fields away from it. The model
+    was trained on decoded payloads, so `q=%27+OR+%271%27%3D%271` is invisible to it as-is."""
+    raw = text[:WAF_MAX_VALUE_CHARS]
+    out = [raw]
+    if request_target.is_form(text):
+        values = request_target.body_values(text)
+    else:  # not key=value shaped: a bare encoded payload is judged as a whole
+        values = []
+        if request_target.has_escapes(text):
+            dec = request_target.decode_text(text)[:WAF_MAX_VALUE_CHARS]
+            if dec != raw and request_target.worth_scoring(dec):
+                values.append(dec)
+    for v in values:
+        if v not in out:
+            out.append(v)
+        if len(out) >= WAF_MAX_FORM_VALUES + 1:
+            break
     return out
 
 
