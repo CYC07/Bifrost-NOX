@@ -97,9 +97,10 @@ def test_vectorised_sweep_rule_equals_the_reference_implementation():
     evs = [[], ["confidentiality-marker"], ["id-number", "home-address"], ["id-number"], ["name-amount-list", "patient-narrative"]]
     scores = [{k: rng.choice([0.0, 0.1, 0.3, 0.5, 0.7, 0.95, rng.random()]) for k in keys} for _ in range(400)]
     ev = [rng.choice(evs) for _ in range(400)]
+    q = np.array([rng.random() < .4 for _ in range(400)])
     A = L.Arrays({k: np.array([s[k] for s in scores]) for k in keys}, np.array([len(e) for e in ev]),
                  np.array([sum(1 for x in e if x in L.IDENT) for e in ev]), 400,
-                 *(np.array(["x"] * 400) for _ in range(4)), np.zeros(400))
+                 *(np.array(["x"] * 400) for _ in range(4)), np.zeros(400), q)
     for trial in range(60):
         rule = {"keys": keys[:4], "thr": {k: rng.choice([0.3, 0.5, 0.7, 0.9]) for k in keys[:4]}}
         if rng.random() < .6:
@@ -111,7 +112,9 @@ def test_vectorised_sweep_rule_equals_the_reference_implementation():
         if rng.random() < .4:
             rule["identity_bundle"] = rng.choice([1, 2])
         # `low` must stay below `thr` for the two tiers to be distinguishable; the equivalence holds regardless
-        want = np.array([L.decide(rule, scores[i], ev[i])[0] for i in range(400)])
+        if rng.random() < .5:
+            rule["question"] = True
+        want = np.array([L.decide(rule, scores[i], ev[i], bool(q[i]))[0] for i in range(400)])
         assert (L.vblock(rule, A) == want).all(), rule
 
 

@@ -92,6 +92,22 @@ def clinical_note(text: str) -> str | None:
 DETECTORS = (confidentiality_marker, id_number, date_of_birth, home_address, name_amount_list, patient_narrative, clinical_note)
 
 
+# A short question / request for help: it asks about a topic, it is not a record. Used to stop the topic-scoring
+# NLI from blocking "How is my credit score calculated?" (fin label 0.96). Short only: a long paste that happens
+# to contain a "?" is judged normally.
+QUESTION_MAX_CHARS = 600
+_INTERROGATIVE = re.compile(
+    r"^\W*(?:how|what|whats|what's|when|where|why|who|which|can|could|should|would|do|does|did|is|are)\b", re.I)
+
+
+def question_form(text: str) -> bool:
+    """A short text with a question mark, or opening with an interrogative / auxiliary word."""
+    t = text.strip()
+    if not t or len(t) > QUESTION_MAX_CHARS:
+        return False
+    return "?" in t or bool(_INTERROGATIVE.match(t))
+
+
 MAX_SCAN_CHARS = 10_000  # evidence is looked for in the head of a body only (it runs for every non-prose body)
 
 

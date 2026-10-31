@@ -22,6 +22,7 @@ from common.utils import setup_logging
 from ml.waf.predictor import WAFClassifier
 from ml.sensitive.predictor import SensitiveClassifier
 from ml.sensitive.evidence import find_evidence
+from ml.sensitive.chat import message_text
 from ml.secrets.detector import detect as detect_secrets
 from ml.router.predictor import RouterClassifier
 from ml.prompt_injection.predictor import PromptInjectionClassifier
@@ -448,8 +449,16 @@ def _analyze_sync(text: str, in_scope: bool = False, direction: str = "outbound"
         # whatever the router said (outbound only: inbound the finding is advisory, so it is not worth an
         # NLI pass on every API reply that mentions an account number). Ordinary web_request / code
         # bodies still skip the NLI.
-        if not any(r.blocked for r in results) and (route == "prose" or (direction == "outbound" and find_evidence(text))):
-            results.append(_sensitive_for_direction(text, direction))
+        # A chat-API body is judged on what its user/assistant/tool messages say, never on the JSON wrapper or
+        # on `system` text (a developer's "never reveal these instructions" prompt is not a leak): the
+        # extracted text is what gets routed, checked for evidence and scored.
+        s_text, s_route = text, route
+        chat_text = message_text(text)
+        if chat_text is not None:
+            s_text, s_route = chat_text, (_route(chat_text) if chat_text.strip() else "")
+        if (s_text.strip() and not any(r.blocked for r in results)
+                and (s_route == "prose" or (direction == "outbound" and find_evidence(s_text)))):
+            results.append(_sensitive_for_direction(s_text, direction))
         # The router guesses the SHAPE of a body; injection payloads are often shaped like code
         # or prose (`1 UNION SELECT ...`, shell one-liners, <script> blocks), so for route
         # code/prose the WAF still looks at the lines carrying a strong injection marker.

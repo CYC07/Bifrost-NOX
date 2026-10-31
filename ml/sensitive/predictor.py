@@ -28,7 +28,7 @@ import os
 from dataclasses import dataclass, field
 
 from ml.sensitive import labels as lb
-from ml.sensitive.evidence import IDENTITY, find_evidence
+from ml.sensitive.evidence import IDENTITY, find_evidence, question_form
 
 logger = logging.getLogger("sensitive.predictor")
 
@@ -138,6 +138,10 @@ class SensitiveClassifier:
             if lb.IDENTITY_BUNDLE and sum(1 for e in evidence if e in IDENTITY) >= lb.IDENTITY_BUNDLE:
                 d = decide_from_scores({}, evidence)
                 return SensitivePrediction(d.label, d.score, True, d.risk, evidence=evidence, reason=d.reason)
+            # a short question with no hard evidence asks ABOUT a topic ("How is my credit score calculated?"
+            # scores 0.96 on the finance label); it holds no record, so the topic-scoring NLI is skipped
+            if not evidence and question_form(text):
+                return SensitivePrediction("none", 0.0, False, "safe", reason="question")
             hyps = self._labels
             out = self._pipe(
                 text[:MAX_CHARS],
