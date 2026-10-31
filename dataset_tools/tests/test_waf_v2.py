@@ -316,3 +316,229 @@ def test_build_is_deterministic(tmp_path):
     build.build(root, str(a), seed=5, n_clean=300, include_local_pools=False)
     build.build(root, str(b), seed=5, n_clean=300, include_local_pools=False)
     assert open(a / "train.jsonl").read() == open(b / "train.jsonl").read()
+
+
+# --- shared fixtures for the holdout-source / byte-identity tests ---------------------------------
+def _rich_root(src):
+    """`_fake_root` plus enough unique payloads in every repo (incl. fuzzdb) for a meaningful split."""
+    root = _fake_root(src)
+    p = src / "patt" / "SQL Injection" / "Intruder"
+    (p / "many.txt").write_text("\n".join(f"' OR {i}={i}--" for i in range(400)))
+    (src / "seclists" / "Fuzzing" / "XSS" / "robot-friendly" / "many.txt").write_text(
+        "\n".join(f"<img src=x onerror=alert({i})>" for i in range(300)))
+    fz = src / "fuzzdb" / "attack"
+    for sub, name, body in (
+            ("sql-injection", "f1.txt", "\n".join(f"' OR 'fz{i}'='fz{i}'--" for i in range(150))),
+            ("xss", "fx.txt", "\n".join(f"<svg onload=fzalert({i})>" for i in range(150))),
+            ("path-traversal", "pt.txt", "\n".join(f"../../fzdir{i}/../../etc/passwd" for i in range(100))),
+            ("os-cmd-execution", "oc.txt", "\n".join(f"; fzcmd{i} /etc/passwd" for i in range(100)))):
+        (fz / sub).mkdir(parents=True, exist_ok=True)
+        (fz / sub / name).write_text(body)
+    return root
+
+
+def _stub_generators(monkeypatch, extra=()):
+    """Pure-python stand-ins for the Faker-based generators, so golden hashes cannot be broken by a
+    Faker upgrade (the byte-identity test is about build.py, not about Faker). `extra` values are
+    appended to the generated clean values (used to prove probes cannot leak into training)."""
+    monkeypatch.setattr(benign, "generate",
+                        lambda n, seed=0, pool=None: [f"benign value {i} o'brien {seed}" for i in range(n)] + list(extra))
+    monkeypatch.setattr(benign, "credential_forms",
+                        lambda n, seed=0: [f"username=u{i}&password=p{i}{seed}" for i in range(n)])
+
+
+OUT_FILES = ("train.jsonl", "val.jsonl", "test.jsonl", "test_ood.jsonl", "DATASET_CARD.md")
+
+
+def _digests(out_dir):
+    import hashlib
+    return {n: hashlib.sha256(open(os.path.join(out_dir, n), "rb").read()).hexdigest() for n in OUT_FILES}
+
+
+# sha256 of the five default outputs of `_rich_root` + stubbed generators (seed=7, n_clean=600) as
+# produced by the code BEFORE --holdout-source existed. A change here means the default build changed.
+GOLDEN_DEFAULT = {
+    "train.jsonl": "ecc46ec3cd029f24809a4ace0de86f76f9f1d2dc2b508a6e456bc272619e6976",
+    "val.jsonl": "c72686073826acbf578beed8e5f9c30f5782d1f2a70fd66af57461d818366f79",
+    "test.jsonl": "565c5918bdd1bee49ee40d13c66af53414d3d07e4ffd0798ee769205802e493a",
+    "test_ood.jsonl": "6a169d0d9e2d14793f24847cc3f2a90db6bd9a95953fce729d296de09350d7b8",
+    "DATASET_CARD.md": "c8244312701102c71a02d4fdc628d0c0989b15ecc7b9739ebdfde675a0551b89",
+}
+
+
+def test_default_build_is_byte_identical_to_the_pre_holdout_build(tmp_path, monkeypatch):
+    _stub_generators(monkeypatch)
+    out = tmp_path / "o"
+    build.build(_rich_root(tmp_path / "s"), str(out), seed=7, n_clean=600, include_local_pools=False)
+    assert _digests(str(out)) == GOLDEN_DEFAULT
+    assert not (out / "test_holdout.jsonl").exists()
+
+
+def test_explicit_no_holdout_equals_default(tmp_path, monkeypatch):
+    _stub_generators(monkeypatch)
+    out = tmp_path / "o"
+    build.build(_rich_root(tmp_path / "s"), str(out), seed=7, n_clean=600, include_local_pools=False,
+                holdout_source=None)
+    assert _digests(str(out)) == GOLDEN_DEFAULT
+
+
+def test_default_build_drops_a_stale_holdout_file_and_zip_ignores_it(tmp_path, monkeypatch):
+    """A leftover test_holdout.jsonl from an earlier holdout build in the same directory must not be
+    silently packed into the zip of a default build."""
+    import zipfile
+    _stub_generators(monkeypatch)
+    out = tmp_path / "o"
+    out.mkdir()
+    (out / "test_holdout.jsonl").write_text('{"text": "stale"}\n')
+    build.build(_rich_root(tmp_path / "s"), str(out), seed=7, n_clean=600, include_local_pools=False)
+    assert not (out / "test_holdout.jsonl").exists()
+    names = zipfile.ZipFile(build.make_zip(str(out))).namelist()
+    assert "test_holdout.jsonl" not in names and sorted(names) == sorted(OUT_FILES)
+
+
+# --- hold out a whole payload source -------------------------------------------------------------
+FZ_MARKERS = ("fzalert", "fzdir", "fzcmd", "'fz")        # only ever appear in the fuzzdb fixture files
+PROBE_TEXT = "Please contact our support team if you have any questions."
+
+
+@pytest.fixture(scope="module")
+def held(tmp_path_factory):
+    """Holdout build whose clean generator also emits probe texts (they must be kept out of training)."""
+    from dataset_tools.waf.v2 import probes
+    mp = pytest.MonkeyPatch()
+    try:
+        _stub_generators(mp, extra=[PROBE_TEXT, probes.REALISTIC_BENIGN[0][1]])
+        src = tmp_path_factory.mktemp("hsrc")
+        out = tmp_path_factory.mktemp("hout")
+        rep = build.build(_rich_root(src), str(out), seed=7, n_clean=600, include_local_pools=False,
+                          holdout_source="fuzzdb")
+    finally:
+        mp.undo()
+    return str(out), rep
+
+
+def test_holdout_writes_a_separate_file_and_reports_it(held):
+    d, rep = held
+    rows = _read(d, "test_holdout.jsonl")
+    assert rows and rep["counts"]["test_holdout"] == len(rows)
+    assert rep["holdout"]["source"] == ["fuzzdb"]
+    for r in rows:
+        assert set(r) >= {"text", "label", "source", "shape", "group"} and r["label"] in LABELS
+        assert 0 < len(r["text"]) <= 2048
+    assert "fuzzdb" in open(os.path.join(d, "DATASET_CARD.md")).read().lower()
+
+
+def test_no_row_outside_the_holdout_file_carries_the_held_out_source(held):
+    d, _ = held
+    for split in ("train", "val", "test", "test_ood"):
+        rows = _read(d, f"{split}.jsonl")
+        assert rows
+        assert not [r for r in rows if r["source"].split(":")[0] == "fuzzdb"], split
+        blob = "\n".join(r["text"] for r in rows)
+        assert not [m for m in FZ_MARKERS if m in blob], (split, "held-out payload text leaked")
+
+
+def test_holdout_file_holds_only_held_out_payloads_plus_handwritten_probes(held):
+    d, _ = held
+    rows = _read(d, "test_holdout.jsonl")
+    srcs = {r["source"].split(":")[0] for r in rows}
+    assert srcs == {"fuzzdb", "handwritten"}
+    attacks = [r for r in rows if r["source"].startswith("fuzzdb")]
+    assert {r["label"] for r in attacks} >= {"sqli", "xss", "path_traversal", "command_injection"}
+    assert all(r["label"] != "clean" for r in attacks)
+    assert any(any(m in r["text"] for m in FZ_MARKERS) for r in attacks)
+
+
+def test_holdout_attacks_use_only_the_training_shapes(held):
+    """Source shift must be measured alone: no OOD carrier shapes mixed in."""
+    d, _ = held
+    shp = {r["shape"] for r in _read(d, "test_holdout.jsonl") if r["source"].startswith("fuzzdb")}
+    assert "bare" in shp and not shp & shapes.HELD_OUT and shp <= set(shapes.SHAPES)
+
+
+def test_holdout_groups_never_appear_in_any_other_split(held):
+    d, _ = held
+    hold_groups = {r["group"] for r in _read(d, "test_holdout.jsonl")}
+    for split in ("train", "val", "test", "test_ood"):
+        assert not hold_groups & {r["group"] for r in _read(d, f"{split}.jsonl")}, split
+
+
+def test_probe_texts_cannot_leak_into_training(held):
+    from dataset_tools.waf.v2 import probes
+    d, _ = held
+    leaked = {build._group(t) for t in probes.all_texts()}
+    for split in ("train", "val", "test", "test_ood"):
+        assert not leaked & {r["group"] for r in _read(d, f"{split}.jsonl")}, split
+    assert build._group(PROBE_TEXT) in leaked
+
+
+def test_holdout_file_contains_all_probes_and_realistic_benign_bodies(held):
+    from dataset_tools.waf.v2 import probes
+    d, _ = held
+    rows = _read(d, "test_holdout.jsonl")
+    pr = [r for r in rows if r["shape"] == "probe"]
+    assert len(pr) == len(probes.PROBES) == 25
+    assert sum(r["label"] == "clean" for r in pr) == 15 and sum(r["label"] != "clean" for r in pr) == 10
+    assert {r["text"] for r in pr} == {t for _, _, t in probes.PROBES}
+    native = [r for r in rows if r["shape"] == "native"]
+    assert {r["text"] for r in native} == {t for _, t in probes.REALISTIC_BENIGN if len(t) <= 2048}
+    assert all(r["label"] == "clean" for r in native) and len(native) >= 40
+    wrapped = [r for r in rows if r["source"].startswith("handwritten:benign") and r["shape"] != "native"]
+    assert wrapped and all(r["label"] == "clean" for r in wrapped)
+
+
+def test_holdout_build_is_deterministic(tmp_path, monkeypatch):
+    _stub_generators(monkeypatch)
+    root = _rich_root(tmp_path / "s")
+    a, b = tmp_path / "a", tmp_path / "b"
+    for o in (a, b):
+        build.build(root, str(o), seed=7, n_clean=600, include_local_pools=False, holdout_source="fuzzdb")
+    for n in OUT_FILES + ("test_holdout.jsonl",):
+        assert open(a / n, "rb").read() == open(b / n, "rb").read(), n
+
+
+def test_holdout_denylist_applies_to_the_holdout_file(tmp_path, monkeypatch):
+    _stub_generators(monkeypatch)
+    root = _rich_root(tmp_path / "s")
+    out = tmp_path / "o"
+    build.build(root, str(out), seed=7, n_clean=300, include_local_pools=False, holdout_source="fuzzdb",
+                denylist=("fzcmd5",))
+    blob = "".join(open(out / n).read() for n in OUT_FILES[:4] + ("test_holdout.jsonl",))
+    assert "fzcmd5" not in blob and "fzcmd6" in blob
+
+
+def test_holdout_of_a_source_with_no_payloads_is_an_error(tmp_path, monkeypatch):
+    """An empty holdout would make the holdout-recall gate vacuous."""
+    _stub_generators(monkeypatch)
+    with pytest.raises(ValueError, match="nosuchsource"):
+        build.build(_rich_root(tmp_path / "s"), str(tmp_path / "o"), seed=7, n_clean=100,
+                    include_local_pools=False, holdout_source="nosuchsource")
+
+
+def test_zip_includes_the_holdout_file_only_when_built(held, tmp_path):
+    import zipfile
+    d, _ = held
+    assert "test_holdout.jsonl" in zipfile.ZipFile(build.make_zip(d)).namelist()
+
+
+def test_cli_accepts_holdout_source(tmp_path, monkeypatch, capsys):
+    _stub_generators(monkeypatch)
+    root = _rich_root(tmp_path / "s")
+    data = tmp_path / "data"
+    data.mkdir()
+    monkeypatch.setattr(build, "DATA_DIR", str(data))
+    out = tmp_path / "o"
+    monkeypatch.setattr(sys, "argv", ["build", "--root", root, "--out", str(out), "--n-clean", "200",
+                                      "--holdout-source", "fuzzdb"])
+    build.main()
+    assert (out / "test_holdout.jsonl").exists() and (out / "dataset_v2.zip").exists()
+
+
+def test_probe_data_is_self_consistent():
+    from dataset_tools.waf.v2 import probes
+    texts = probes.all_texts()
+    assert len(texts) == len(set(texts)), "probe texts must be unique"
+    assert len(probes.REALISTIC_BENIGN) >= 40
+    assert {lab for _, lab, _ in probes.PROBES} <= set(LABELS)
+    assert max(len(t) for t in texts) < 2048
+    assert all(t.strip() for t in texts)
