@@ -22,6 +22,7 @@ import os
 import random
 import zipfile
 from collections import Counter
+from urllib.parse import unquote
 
 from ml.waf.taxonomy import LABELS
 from dataset_tools.waf.v2 import benign, payloads, probes, shapes
@@ -110,6 +111,13 @@ def _source_of(rec: dict) -> str:
     return rec["source"].split(":")[0]
 
 
+def _twin_key(text: str) -> str:
+    """Normal form for near-duplicate detection: percent-decoded (twice), lower-cased, whitespace collapsed."""
+    for _ in range(2):
+        text = unquote(text)
+    return " ".join(text.lower().split())
+
+
 def build(root: str, out_dir: str, seed: int = 42, n_clean: int = 36000, cap_per_attack: int = 9000,
           include_local_pools: bool = True, denylist: tuple = (), holdout_source=None) -> dict:
     rng = random.Random(seed)
@@ -134,10 +142,18 @@ def build(root: str, out_dir: str, seed: int = 42, n_clean: int = 36000, cap_per
         seen.add(t.lower())
         by_label.setdefault(r["label"], []).append(r)
     held: list[dict] = []
+    dropped_twins = 0
     if holdout:
         for label in list(by_label):
             held += [r for r in by_label[label] if _source_of(r) in holdout]
             by_label[label] = [r for r in by_label[label] if _source_of(r) not in holdout]
+        # near-twins: a held-out value that is the percent-encoded / re-spaced / re-cased copy of a value
+        # that stays in training would leak through the exact-text dedupe (the loader keeps the encoded
+        # variant from one repo and the decoded one from another). Drop them from the holdout.
+        kept_keys = {_twin_key(r["text"]) for recs in by_label.values() for r in recs}
+        n_held = len(held)
+        held = [r for r in held if _twin_key(r["text"]) not in kept_keys]
+        dropped_twins = n_held - len(held)
         if not held:
             raise ValueError(f"--holdout-source {','.join(holdout)}: no payload from that source "
                              f"(sources present: {sorted({_source_of(r) for r in attacks})})")
@@ -199,7 +215,8 @@ def build(root: str, out_dir: str, seed: int = 42, n_clean: int = 36000, cap_per
         report["holdout"] = {"source": list(holdout),
                              "attack_labels": dict(Counter(r["label"] for r in splits["test_holdout"]
                                                            if r["source"].split(":")[0] in holdout)),
-                             "shapes": dict(Counter(r["shape"] for r in splits["test_holdout"]))}
+                             "shapes": dict(Counter(r["shape"] for r in splits["test_holdout"])),
+                             "dropped_near_twins": dropped_twins}
     for name, recs in splits.items():
         with open(os.path.join(out_dir, f"{name}.jsonl"), "w", encoding="utf-8") as f:
             for r in recs:
@@ -270,6 +287,8 @@ def _card(rep: dict) -> str:
                   "probes (shape `probe`) and realistic benign bodies (`handwritten:benign_bodies`).",
                   "Attack rows by label: " + json.dumps(h["attack_labels"], sort_keys=True),
                   "Rows by shape: " + json.dumps(h["shapes"], sort_keys=True),
+                  f"{h['dropped_near_twins']} held-out value(s) dropped because a percent-decoded / re-cased / re-spaced",
+                  "near-twin of them stays in training (exact-text dedupe cannot see those).",
                   "Only the clean rows of this file are independent of the training generators."]
     return "\n".join(lines) + "\n"
 
