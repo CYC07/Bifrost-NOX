@@ -19,6 +19,7 @@ from presidio_analyzer import AnalyzerEngine
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from common.schemas import VerdictStatus, AggregatedVerdict, RiskLevel, AnalysisResult
 from common.utils import setup_logging
+from common.iban import inside_iban_shape, presidio_safe
 from ml.waf.predictor import WAFClassifier
 from ml.sensitive.predictor import SensitiveClassifier
 from ml.sensitive.evidence import find_evidence
@@ -179,15 +180,33 @@ def model_code_analysis(text, direction="outbound"):
                           raw_data={"advisory": True})
 
 PII_MIN_SCORE = float(os.getenv("PII_MIN_SCORE", "0.4"))
-_PII_SENSITIVE = {"CREDIT_CARD", "US_SSN", "IBAN"}
+# Presidio names the IBAN entity IBAN_CODE and silently ignores unknown names in `entities`:
+# asking for "IBAN" meant IBANs were never looked for at all.
+_PII_SENSITIVE = {"CREDIT_CARD", "US_SSN", "IBAN_CODE"}
+_PII_ENTITIES = ["PHONE_NUMBER", "EMAIL_ADDRESS", "IBAN_CODE", "CREDIT_CARD", "US_SSN"]
 # A Luhn-valid number scores 1.0 whatever it is (device ids, session ids...), so a card needs
 # card formatting (groups separated by space/dash) or card-ish words just before it.
 _CARD_CONTEXT = re.compile(r"card|credit|debit|visa|master|amex|\bcc\b|cc_|ccnum|cvv|cvc|expir|payment|\bpan\b", re.I)
 _CARD_GROUPED = re.compile(r"\d{4}[ -]\d{4}[ -]\d{4}[ -]\d{1,7}$")
+# Presidio only reports an IBAN whose country format and mod-97 checksum are valid, and then
+# scores it 1.0; like a card it additionally needs IBAN print formatting (4-char groups) or
+# banking words just before it. A bare compact one (could be an order/reference id) is advisory.
+_IBAN_CONTEXT = re.compile(r"iban|\bbank|account|\bacct|transfer|\bwire|sepa|beneficiar|payee|\bpay|remit|"
+                           r"swift|\bbic\b|konto|\brib\b", re.I)
+_IBAN_GROUPED = re.compile(r"[A-Z]{2}\d{2}(?:[ -][A-Z0-9]{4}){2,7}(?:[ -][A-Z0-9]{1,3})?$")
 
 
 def _looks_like_card(text: str, start: int, end: int) -> bool:
-    return bool(_CARD_GROUPED.search(text[start:end].strip()) or _CARD_CONTEXT.search(text[max(0, start - 60):start]))
+    # digit groups inside an IBAN-shaped run (valid or not) are not card formatting
+    grouped = _CARD_GROUPED.search(text[start:end].strip()) and not inside_iban_shape(text, start, end)
+    return bool(grouped or _CARD_CONTEXT.search(text[max(0, start - 60):start]))
+
+
+def _looks_like_iban(text: str, start: int, end: int) -> bool:
+    return bool(_IBAN_GROUPED.match(text[start:end].strip()) or _IBAN_CONTEXT.search(text[max(0, start - 60):start]))
+
+
+_PII_EVIDENCE = {"CREDIT_CARD": _looks_like_card, "IBAN_CODE": _looks_like_iban}
 
 
 def model_patterns(text, direction="outbound"):
@@ -196,14 +215,15 @@ def model_patterns(text, direction="outbound"):
     Found live: a Windows push-service reply and an app login body were blocked as US_SSN
     although Presidio itself scored them 0.05 (any bare 9-digit id). So: a sensitive entity
     blocks only at score >= PII_MIN_SCORE (bare 9 digits 0.05; formatted SSN 0.5; with
-    context 0.85), and a credit card additionally needs card formatting or card-ish context.
+    context 0.85); a credit card additionally needs card formatting or card-ish context, and an
+    IBAN (checksum-validated by Presidio) needs 4-char group formatting or banking context.
     Anything weaker that still matched is reported as advisory. Inbound replies are advisory
     only (a server's own reply is not exfiltration). Contact info (phone/email) is
     informational: routine in normal traffic."""
     if not presidio_analyzer:
         return AnalysisResult(module="pattern", score=0.0, findings=["Presidio not loaded"])
     try:
-        results = presidio_analyzer.analyze(text=text, entities=["PHONE_NUMBER", "EMAIL_ADDRESS", "IBAN", "CREDIT_CARD", "US_SSN"], language='en')
+        results = presidio_analyzer.analyze(text=presidio_safe(text), entities=_PII_ENTITIES, language='en')
         findings: list[str] = []
         hard = soft = False
         for res in results:
@@ -213,8 +233,8 @@ def model_patterns(text, direction="outbound"):
             if res.score < PII_MIN_SCORE:
                 continue                                  # Presidio itself says "unlikely"
             findings.append(f"PII Detected: {res.entity_type} ({res.score:.2f})")
-            card_ok = res.entity_type != "CREDIT_CARD" or _looks_like_card(text, res.start, res.end)
-            if direction == "outbound" and card_ok:
+            evidence = _PII_EVIDENCE.get(res.entity_type)
+            if direction == "outbound" and (evidence is None or evidence(text, res.start, res.end)):
                 hard = True
             else:
                 soft = True
@@ -239,7 +259,9 @@ def _waf_inputs(text: str) -> list[str]:
     """What the WAF should look at. JSON bodies are scored value-by-value (the way real
     WAFs inspect parameters): the model was trained on bare payloads/URLs and classifies
     the *shape* of a JSON blob (braces, quotes, "username"/"password") as SQL injection,
-    while the individual values are judged on their content. Anything else is scored whole."""
+    while the individual values are judged on their content. Anything else is scored whole.
+    A string value with %XX escapes is followed by its decoded form when that is attack-shaped
+    (same rule as form values), so `{"q": "1%27%20UNION..."}` is not invisible to the model."""
     s = text.lstrip()
     if not s.startswith(("{", "[")):
         return _form_inputs(text)
@@ -248,9 +270,11 @@ def _waf_inputs(text: str) -> list[str]:
     except Exception:  # noqa: BLE001 — malformed JSON: fall back to the whole text
         return [text[:WAF_MAX_VALUE_CHARS]]
     out: list[str] = []
+    n_raw = n_dec = 0
 
     def walk(o):
-        if len(out) >= WAF_MAX_VALUES:
+        nonlocal n_raw, n_dec
+        if n_raw >= WAF_MAX_VALUES:
             return
         if isinstance(o, dict):
             for v in o.values():
@@ -262,8 +286,26 @@ def _waf_inputs(text: str) -> list[str]:
             v = str(o).strip()
             if v:
                 out.append(v[:WAF_MAX_VALUE_CHARS])
+                n_raw += 1
+                if isinstance(o, str) and n_dec < WAF_MAX_FORM_VALUES:
+                    dec = _decoded_value(v)
+                    if dec and dec not in out:
+                        out.append(dec)
+                        n_dec += 1
     walk(obj)
     return out
+
+
+def _decoded_value(v: str) -> str | None:
+    """The percent-decoded form of a JSON string value, or None when decoding changes nothing or
+    the result is not attack-shaped (plain words, encoded URLs, emails and spaces stay away from
+    the model). JSON is not form-encoded, so '+' is kept as a literal plus."""
+    if not request_target.has_escapes(v):
+        return None
+    dec = request_target.decode_text(v).strip()[:WAF_MAX_VALUE_CHARS]
+    if dec == v or request_target.is_plain_url(dec) or not request_target.worth_scoring(dec):
+        return None
+    return dec
 
 
 def _form_inputs(text: str) -> list[str]:
