@@ -97,6 +97,11 @@ def worth_scoring(v: str) -> bool:
     return bool(_ACTIVE.search(v) or "\ufffd" in v or _TRAVERSAL.search(v) or _SENSITIVE.search(v))
 
 
+def is_plain_url(v: str) -> bool:
+    """An ordinary http(s)/ftp URL with no active characters (never worth a model look)."""
+    return bool(_PLAIN_URL.match(v))
+
+
 def has_escapes(s: str) -> bool:
     """True when `s` carries %XX escapes (so decoding it can change what the WAF sees)."""
     return bool(_ESCAPE.search(s or ""))
