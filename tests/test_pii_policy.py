@@ -122,6 +122,113 @@ def test_min_score_is_configurable(monkeypatch):
     assert not P("ssn 536-90-4399").blocked      # 0.85 < 0.9
 
 
+# --- IBAN ---------------------------------------------------------------------------------------
+# Presidio calls the entity IBAN_CODE and silently ignores unknown names in `entities`, so asking
+# for "IBAN" meant no IBAN was ever looked for. Presidio checks country format + mod-97 and scores
+# a valid IBAN 1.0, so like a card it additionally needs IBAN formatting or banking context.
+IBAN_DE = "DE89370400440532013000"            # documentation example IBANs (valid checksums)
+IBAN_GB = "GB82WEST12345698765432"
+IBAN_MT = "MT84MALT011000012345MTLCAST001S"
+
+
+def _spaced(s):
+    return " ".join(s[i:i + 4] for i in range(0, len(s), 4))
+
+
+def _broken(s):
+    return s[:2] + f"{(int(s[2:4]) + 1) % 100:02d}" + s[4:]
+
+
+def test_requested_entities_are_ones_presidio_supports():
+    supported = set(svc.presidio_analyzer.get_supported_entities("en"))
+    assert set(svc._PII_ENTITIES) <= supported
+    assert set(svc._PII_SENSITIVE) <= supported
+
+
+@pytest.mark.parametrize("text", [
+    f"IBAN: {IBAN_DE}",
+    f"please transfer to {IBAN_GB} today",
+    f"my account is {IBAN_MT}",
+    f'{{"iban":"{IBAN_DE}","amount":120}}',
+    _spaced(IBAN_DE),
+    _spaced(IBAN_MT),
+    f"wire the money to IBAN {_spaced(IBAN_GB)}",
+])
+def test_valid_iban_with_format_or_context_blocks_outbound(text):
+    r = P(text)
+    assert r.blocked and any("IBAN_CODE" in f for f in r.findings)
+
+
+IBAN_ES = "ES9121000418450200051332"           # BBAN is whole 4-char groups (also SE, AT, BE...)
+
+
+@pytest.mark.parametrize("text", [
+    f"please transfer to {IBAN_ES} today",
+    f"please transfer to {_spaced(IBAN_ES)} Today",
+    f"wire the deposit to {IBAN_ES} before friday",
+    f"IBAN {IBAN_ES} - thanks",
+])
+def test_iban_followed_by_a_word_is_still_found(text):
+    # Presidio's IBAN regex is case-insensitive and swallows the next word ("... 1332 toda"+"y"),
+    # so the checksum is computed over the wrong text; the service preprocesses that away.
+    r = P(text)
+    assert r.blocked and any("IBAN_CODE" in f for f in r.findings)
+
+
+def test_iban_preprocessing_keeps_offsets():
+    from common.iban import presidio_safe
+    t = f"please transfer to {_spaced(IBAN_ES)} today and card 4111 1111 1111 1111 now"
+    out = presidio_safe(t)
+    assert len(out) == len(t) and out.replace("\t", " ") == t
+
+
+def test_bare_compact_valid_iban_is_advisory_not_blocked():
+    r = P(IBAN_DE)
+    assert not r.blocked
+    assert r.raw_data and r.raw_data.get("advisory") is True
+
+
+@pytest.mark.parametrize("iban", [IBAN_DE, IBAN_GB, IBAN_MT, "ES9121000418450200051332"])
+@pytest.mark.parametrize("fmt", [lambda s: s, _spaced])
+@pytest.mark.parametrize("tpl", ["{}", "IBAN: {}", "my account is {}", "please transfer to {} today"])
+def test_iban_with_broken_checksum_never_blocks(iban, fmt, tpl):
+    # spaced DE/ES IBANs used to block as CREDIT_CARD (a Luhn-valid 4x4 digit group inside)
+    assert not P(tpl.format(fmt(_broken(iban)))).blocked
+
+
+@pytest.mark.parametrize("text", [
+    "DE30 1689 7684 6978 8093 20",                      # broken checksum, Luhn-valid 4x4 digits inside
+    "please transfer to ES83 0175 6820 5258 9831 9489 today",
+])
+def test_card_shaped_digits_inside_an_invalid_iban_do_not_block(text):
+    assert not P(text).blocked
+
+
+@pytest.mark.parametrize("text", [
+    "Order ID: DE12345678901234567890",
+    "VAT number DE123456789 on the invoice",
+    "serial no. AB12 CD34 EF56 GH78 IJ90",
+    "tracking 1Z999AA10123456784",
+    "transfer to account 12345678, sort code 12-34-56",
+])
+def test_ordinary_ids_are_not_ibans(text):
+    assert not P(text).blocked
+
+
+def test_inbound_iban_is_advisory():
+    r = P(f"IBAN: {_spaced(IBAN_DE)}", "inbound")
+    assert not r.blocked and r.findings
+    assert r.raw_data and r.raw_data.get("advisory") is True
+
+
+def test_iban_in_image_text_blocks_and_broken_one_does_not():
+    from ml.image.ocr_scan import scan_ocr_text
+    eng = svc.presidio_analyzer
+    assert scan_ocr_text(f"Beneficiary IBAN {_spaced(IBAN_DE)}", eng).blocked
+    assert not scan_ocr_text(f"Beneficiary IBAN {_spaced(_broken(IBAN_DE))}", eng).blocked
+    assert scan_ocr_text(f"Pay to {IBAN_ES} before Friday", eng).blocked
+
+
 # --- through the whole service ----------------------------------------------------------------
 import asyncio  # noqa: E402
 

@@ -21,6 +21,7 @@ Fail-open: any exception yields a neutral result, never a crash.
 import logging
 import re
 
+from common.iban import inside_iban_shape, presidio_safe
 from common.schemas import AnalysisResult, RiskLevel
 from ml.image.ocr_tolerant import tolerant_findings
 from ml.secrets.detector import detect as detect_secrets
@@ -30,7 +31,9 @@ logger = logging.getLogger("image_service")
 
 # Financial/government identifiers — never benign in transit, so they block.
 # Contact info (email/phone) is surfaced but does not block (routine traffic).
-_BLOCKING_PII = {"CREDIT_CARD", "US_SSN", "IBAN"}
+# Presidio's entity is IBAN_CODE (an unknown name like "IBAN" is silently ignored);
+# it is only reported when the country format and mod-97 checksum are valid.
+_BLOCKING_PII = {"CREDIT_CARD", "US_SSN", "IBAN_CODE"}
 _CONTACT_PII = {"EMAIL_ADDRESS", "PHONE_NUMBER"}
 _PRESIDIO_ENTITIES = list(_BLOCKING_PII | _CONTACT_PII)
 
@@ -142,10 +145,14 @@ def scan_ocr_text(text: str, presidio) -> AnalysisResult:
 
     # 2. Presidio PII.
     try:
-        for res in presidio.analyze(text=text, entities=_PRESIDIO_ENTITIES, language="en"):
+        for res in presidio.analyze(text=presidio_safe(text), entities=_PRESIDIO_ENTITIES, language="en"):
             if res.entity_type == "US_SSN" and res.score < _MIN_SSN_SCORE:
                 continue
             findings.append(f"PII in image text: {res.entity_type} ({res.score:.2f})")
+            # a Luhn-valid 4x4 digit group inside an IBAN-shaped run is not a card
+            # (a printed IBAN with a broken checksum used to block as CREDIT_CARD)
+            if res.entity_type == "CREDIT_CARD" and inside_iban_shape(text, res.start, res.end):
+                continue
             if res.entity_type in _BLOCKING_PII:
                 blocked = True
                 if _risk_index(RiskLevel.CRITICAL) > _risk_index(risk):
