@@ -470,7 +470,22 @@ def _analyze_cached(text: str, in_scope: bool = False, direction: str = "outboun
     return result
 
 
+def _as_text(x) -> str:
+    """Coerce whatever arrived as `text` to a string: None -> "", bytes -> utf-8, dict/list -> compact JSON, other -> str().
+    A non-string must neither crash the analysis nor skip it (the gateway fails open on a 500)."""
+    if isinstance(x, str):
+        return x
+    if x is None:
+        return ""
+    if isinstance(x, (bytes, bytearray)):
+        return bytes(x).decode("utf-8", "replace")
+    if isinstance(x, (dict, list)):
+        return json.dumps(x, ensure_ascii=False, separators=(",", ":"))
+    return str(x)
+
+
 def _analyze_sync(text: str, in_scope: bool = False, direction: str = "outbound") -> dict:
+    text = _as_text(text)
     # Secrets + PII + prompt-injection *signatures* always run — cheap regex, and
     # credential/PII leaks are too high-stakes to make conditional on the router's
     # guess. The prompt-injection MODEL runs only for traffic to an LLM endpoint
@@ -590,7 +605,7 @@ async def analyze_text(request: Request):
     except:
         return JSONResponse({"detail": "Invalid JSON"}, status_code=400)
 
-    text = body.get("text", "")
+    text = _as_text(body.get("text", ""))
     md = body.get("metadata") or {}
     direction = md.get("direction") or "outbound"
     kind = md.get("kind") or ""
