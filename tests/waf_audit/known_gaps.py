@@ -28,31 +28,7 @@ GAPS = [
          fix="v2 retrain; the new held-out set (crs+fuzzdb) measures exactly this."),
 
     # ---------------------------------------------------------------- service hook (text_service/main.py)
-    dict(id="S4", pattern=r"test_audit_robustness\.py::test_pipeline_does_not_raise_on_non_string_input",
-         module="text_service endpoint", stage="request parsing", severity="low",
-         why="analyze_text does len(text) on whatever 'text' the JSON holds; None/number/list/dict raise inside the handler (HTTP 500, the gateway then fails open). "
-             "Only the gateway/orchestrator call it and they send strings, so this is an internal-contract gap.",
-         fix="coerce or reject non-string 'text' with a 400 before analysis."),
-
     # ---------------------------------------------------------------- target pre-filter (ml/waf/target.py)
     # ---------------------------------------------------------------- marker gate (ml/waf/gate.py)
-    dict(id="G1", pattern=r"test_audit_gate\.py::test_obfuscated_variants_are_still_routed\[(newline as space|split by inline comments|mysql version comment)",
-         module="ml/waf/gate.py", stage="marker regex", severity="medium",
-         why="the regex runs line by line, so 'UNION' and 'SELECT' separated by a newline are never seen together; inline-comment splitting (UN/**/ION) and "
-             "MySQL version comments (/*!50000UNION*/) are not normalised before matching.",
-         fix="collapse whitespace and strip /**/ and /*!NNNNN */ before matching."),
-    dict(id="G2", pattern=r"test_audit_gate\.py::test_obfuscated_variants_are_still_routed\[utf8 overlong slash",
-         module="ml/waf/gate.py", stage="decode before match", severity="low",
-         why="the gate percent-decodes first, which turns %c0%af into U+FFFD, so its own %c0%af marker can no longer match.",
-         fix="match markers on both raw and decoded text."),
-    dict(id="G3", pattern=r"test_audit_gate\.py::test_canonical_payload_is_routed_to_the_waf\[ssti freemarker",
-         module="ml/waf/gate.py", stage="marker regex", severity="low",
-         why="the SSTI marker needs words like exec/Runtime/System inside ${...}; FreeMarker's ${ex(\"id\")} after an <#assign> has none.",
-         fix="add <#assign ...Execute and ?new() patterns."),
-    dict(id="G4", pattern=r"test_audit_gate\.py::test_payload_far_beyond_the_scan_window",
-         module="ml/waf/gate.py", stage="MAX_SCAN_CHARS=100000", severity="low",
-         why="bytes after the first 100,000 characters are never scanned; an attacker who can send a larger body pads past it.",
-         fix="scan the tail as well, or reject oversize bodies."),
-
     # ---------------------------------------------------------------- robustness
 ]
