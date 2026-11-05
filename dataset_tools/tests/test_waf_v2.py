@@ -362,7 +362,7 @@ GOLDEN_DEFAULT = {
     "val.jsonl": "c72686073826acbf578beed8e5f9c30f5782d1f2a70fd66af57461d818366f79",
     "test.jsonl": "565c5918bdd1bee49ee40d13c66af53414d3d07e4ffd0798ee769205802e493a",
     "test_ood.jsonl": "6a169d0d9e2d14793f24847cc3f2a90db6bd9a95953fce729d296de09350d7b8",
-    "DATASET_CARD.md": "c8244312701102c71a02d4fdc628d0c0989b15ecc7b9739ebdfde675a0551b89",
+    "DATASET_CARD.md": "e320e27c93742319e105ac9eb5fcc0ca6dddaa75333077bbbde788a5976a00e6",   # card text gained the real-source lines; data digests above unchanged
 }
 
 
