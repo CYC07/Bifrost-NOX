@@ -25,8 +25,10 @@ _MAX_TARGET = 16384
 
 _ACTIVE = re.compile(
     r"""['"`<>;|&$(){}\\\x00]|\.\.|"""
-    r"""\bunion\s+(?:all\s+)?select\b|\bselect\s.+\sfrom\b|\bdrop\s+table\b|\binsert\s+into\b|"""
-    r"""\bdelete\s+from\b|\bsleep\s*\(|\bbenchmark\s*\(|\bxp_cmdshell\b|\bexec\s*\(""",
+    r"""\bunion\s+(?:all\s+)?select\b|\bselect\s.{1,200}?\sfrom\b|\bdrop\s+table\b|\binsert\s+into\b|"""
+    r"""\bdelete\s+from\b|\bsleep\s*\(|\bbenchmark\s*\(|\bxp_cmdshell\b|\bexec\s*\(|"""
+    # quote-free SQL injection: numeric tautologies, column probing, comments used as whitespace
+    r"""\b(?:or|and)\s+\d+\s*=\s*\d+|\border\s+by\s+\d+\b|\bhaving\s+\d+\s*=|/\*""",
     re.I,
 )
 _PLAIN_URL = re.compile(r"""^(?:https?|ftp)://[^\s'"<>`;|{}\\]+$""", re.I)
@@ -72,17 +74,41 @@ def decoded(target: str) -> str:
     return _decode(t)
 
 
+_MAX_COLLECT = 512          # candidates examined before ranking (bounds the work an attacker can force)
+TAIL_CHARS = 1500
+
+
+def _value_parts(v: str) -> list[str]:
+    """What the model is shown of one value: its first MAX_VALUE_CHARS, plus - when the value is longer - its
+    last TAIL_CHARS if that tail is attack-shaped, so a payload placed after long padding is still offered."""
+    out = [v[:MAX_VALUE_CHARS]]
+    if len(v) > MAX_VALUE_CHARS:
+        tail = v[-TAIL_CHARS:]
+        if worth_scoring(tail):
+            out.append(tail)
+    return out
+
+
+def _prioritise(parts: list[str]) -> list[str]:
+    """Strong-marker parts first (stable), then the rest, capped at MAX_VALUES: harmless-but-active padding
+    (O'Brien, prices, code comments) must not push the real payload past the cap."""
+    from ml.waf.gate import has_strong_marker   # lazy: gate imports this module
+    strong = [p for p in parts if has_strong_marker(p)]
+    rest = [p for p in parts if not has_strong_marker(p)]
+    return (strong + rest)[:MAX_VALUES]
+
+
 def waf_values(target: str) -> list[str]:
-    """Decoded query values that deserve a WAF-model look (active, not a plain URL), capped."""
+    """Decoded query values that deserve a WAF-model look (active, not a plain URL), ranked, capped."""
     _, query = _split(target)
     keep: list[str] = []
     for v in _values(query):
         if not v.strip() or _PLAIN_URL.match(v) or not _ACTIVE.search(v):
             continue
-        keep.append(v[:MAX_VALUE_CHARS])
-        if len(keep) >= MAX_VALUES:
+        keep.extend(_value_parts(v))
+        if len(keep) >= _MAX_COLLECT:
             break
-    return keep
+    return _prioritise(keep)
 
 
 _ESCAPE = re.compile(r"%[0-9a-fA-F]{2}")
@@ -146,10 +172,10 @@ def body_values(body: str) -> list[str]:
         v = _decode(raw)
         if not v.strip() or _PLAIN_URL.match(v) or not worth_scoring(v):
             continue
-        keep.append(v[:MAX_VALUE_CHARS])
-        if len(keep) >= MAX_VALUES:
+        keep.extend(_value_parts(v))
+        if len(keep) >= _MAX_COLLECT:
             break
-    return keep
+    return _prioritise(keep)
 
 
 def signature_hits(target: str) -> list[str]:

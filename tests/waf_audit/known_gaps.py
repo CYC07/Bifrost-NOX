@@ -28,16 +28,6 @@ GAPS = [
          fix="v2 retrain; the new held-out set (crs+fuzzdb) measures exactly this."),
 
     # ---------------------------------------------------------------- service hook (text_service/main.py)
-    dict(id="S1", pattern=r"test_audit_robustness\.py::test_payload_cannot_be_hidden_by_position_or_padding\[(sqli|xss)-json, payload after 2\.2 KB of hex padding|test_audit_robustness\.py::test_payload_cannot_be_hidden_by_position_or_padding\[(sqli|xss)-form, payload after 2\.2 KB of hex padding|test_audit_service\.py::test_payload_after_long_benign_text_in_one_json_value",
-         module="text_service hook", stage="input selection (_waf_inputs) + route gating", severity="high",
-         why="a body routed web_request is judged on the first 2000 characters of each value (the model reads 256 tokens). The marker gate "
-             "finds the payload (gate_parts=1) but is skipped when route == web_request, so 2.2 KB of hex/ID padding in front of the payload is ALLOWED. "
-             "Prose padding only 'works' for the defence because it flips the route to prose, where the gate runs.",
-         fix="Run waf_gate_parts() for every outbound route (cheap regex), or score long values in overlapping 1500-char windows."),
-    dict(id="S2", pattern=r"test_audit_robustness\.py::test_payload_cannot_be_hidden_by_position_or_padding\[(sqli|xss)-json, payload as (the 200th of 400 values|value 71 of 71)|test_audit_service\.py::test_leaf_count_cap",
-         module="text_service hook", stage="input selection (_waf_inputs)", severity="high",
-         why="JSON bodies are scored leaf by leaf but only the first WAF_MAX_VALUES=64 leaves; a payload as leaf 71 is never offered to the model.",
-         fix="Prioritise attack-shaped leaves (worth_scoring) before applying the cap, or raise/window the cap."),
     dict(id="S3", pattern=r"test_audit_service\.py::test_payload_in_a_json_key",
          module="text_service hook", stage="input selection (_waf_inputs)", severity="medium",
          why="only JSON values are walked; object keys are never offered to the model.",
@@ -49,15 +39,6 @@ GAPS = [
          fix="coerce or reject non-string 'text' with a 400 before analysis."),
 
     # ---------------------------------------------------------------- target pre-filter (ml/waf/target.py)
-    dict(id="T1", pattern=r"test_audit_target\.py::test_classic_sqli_without_quotes_is_worth_scoring",
-         module="ml/waf/target.py", stage="pre-filter (worth_scoring)", severity="high",
-         why="the 'precision first' filter only forwards values with a quote, <>;|&$(){}\\, '..' or a few SQL phrases. Numeric injection (1 OR 1=1, "
-             "1 ORDER BY 5, 1 HAVING 1=1) and comment-split keywords (UNION/**/SELECT) contain none of those, so the model never sees them.",
-         fix="add tautology/ORDER BY/HAVING patterns and '/**/' to the active set."),
-    dict(id="T2", pattern=r"test_audit_target\.py::test_(padding_with_64|payload_after_long_benign_padding_inside_one_value)",
-         module="ml/waf/target.py", stage="value caps (MAX_VALUES=64, MAX_VALUE_CHARS=2000)", severity="high",
-         why="64 harmless-but-active values (O'Brien-style) fill the budget so the 65th, real payload is dropped; and a payload after 2000 characters in one value is cut off.",
-         fix="rank values by attack-likeness before capping; window long values."),
     dict(id="T3", pattern=r"test_audit_target\.py::test_(parameter_names_are_inspected_too|payload_hidden_in_the_url_path_is_inspected)",
          module="ml/waf/target.py", stage="what is inspected", severity="medium",
          why="only query VALUES are examined; parameter names and URL path segments carrying an injection (/user/1' OR '1'='1/profile, ?<script>=1) are ignored (path gets traversal signatures only).",
@@ -104,9 +85,4 @@ GAPS = [
          fix="scan the tail as well, or reject oversize bodies."),
 
     # ---------------------------------------------------------------- robustness
-    dict(id="R1", pattern=r"test_audit_robustness\.py::test_worth_scoring_is_linear_even_without_the_callers_size_caps\[select x20000\]",
-         module="ml/waf/target.py", stage="_ACTIVE regex (select\\s.+\\sfrom)", severity="low",
-         why="quadratic backtracking: 140 KB of 'select ' takes 21 s. In production the caps (16 KB target = 0.27 s, 2 KB value = 0.004 s) contain it, "
-             "so it is latent, but the function does not protect itself.",
-         fix="bound the .+ (e.g. {1,200}) or truncate inside worth_scoring."),
 ]
