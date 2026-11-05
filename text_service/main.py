@@ -31,7 +31,7 @@ from ml.prompt_injection import signatures as pi_signatures
 from ml.prompt_injection.prompts import extract_prompts, extract_segments
 from common import llm_scope
 from ml.waf import target as request_target
-from ml.waf.gate import waf_gate_parts
+from ml.waf.gate import has_strong_marker, waf_gate_parts
 
 setup_logging("text_service")
 logger = logging.getLogger("text_service")
@@ -253,6 +253,7 @@ WAF_MAX_VALUE_CHARS = int(os.getenv("WAF_MAX_VALUE_CHARS", "2000"))
 # decoded form values shown to the model per body (each costs one WAF inference; the raw text is
 # always scored too, so padding a body with fields cannot hide a payload from the raw pass)
 WAF_MAX_FORM_VALUES = int(os.getenv("WAF_MAX_FORM_VALUES", "16"))
+_WAF_MAX_LEAVES = 4096        # JSON leaves examined before ranking
 
 
 def _waf_inputs(text: str) -> list[str]:
@@ -269,12 +270,10 @@ def _waf_inputs(text: str) -> list[str]:
         obj = json.loads(text)
     except Exception:  # noqa: BLE001 — malformed JSON: fall back to the whole text
         return [text[:WAF_MAX_VALUE_CHARS]]
-    out: list[str] = []
-    n_raw = n_dec = 0
+    leaves: list[tuple[str, bool]] = []          # (text, was a JSON string); bounded so a huge body cannot force unbounded work
 
     def walk(o):
-        nonlocal n_raw, n_dec
-        if n_raw >= WAF_MAX_VALUES:
+        if len(leaves) >= _WAF_MAX_LEAVES:
             return
         if isinstance(o, dict):
             for v in o.values():
@@ -285,14 +284,21 @@ def _waf_inputs(text: str) -> list[str]:
         elif o is not None and not isinstance(o, bool):
             v = str(o).strip()
             if v:
-                out.append(v[:WAF_MAX_VALUE_CHARS])
-                n_raw += 1
-                if isinstance(o, str) and n_dec < WAF_MAX_FORM_VALUES:
-                    dec = _decoded_value(v)
-                    if dec and dec not in out:
-                        out.append(dec)
-                        n_dec += 1
+                leaves.append((v, isinstance(o, str)))
     walk(obj)
+    # Rank before capping: leaves carrying a strong injection marker first, then attack-shaped ones, then
+    # the rest (stable, so ordinary bodies keep their order). Padding a body with 64 harmless values can no
+    # longer push the payload past WAF_MAX_VALUES.
+    rank = lambda t: 0 if has_strong_marker(t[0]) else (1 if request_target.worth_scoring(t[0]) else 2)  # noqa: E731
+    out: list[str] = []
+    n_dec = 0
+    for v, is_str in sorted(leaves, key=rank)[:WAF_MAX_VALUES]:
+        out.extend(request_target._value_parts(v))
+        if is_str and n_dec < WAF_MAX_FORM_VALUES:
+            dec = _decoded_value(v)
+            if dec and dec not in out:
+                out.append(dec)
+                n_dec += 1
     return out
 
 
@@ -502,10 +508,14 @@ def _analyze_sync(text: str, in_scope: bool = False, direction: str = "outbound"
                 and (s_route == "prose" or (direction == "outbound" and find_evidence(s_text)))):
             results.append(_sensitive_for_direction(s_text, direction))
         # The router guesses the SHAPE of a body; injection payloads are often shaped like code
-        # or prose (`1 UNION SELECT ...`, shell one-liners, <script> blocks), so for route
-        # code/prose the WAF still looks at the lines carrying a strong injection marker.
-        if direction == "outbound" and route != "web_request" and not any(r.blocked for r in results):
-            gated = waf_gate_parts(text)
+        # or prose (`1 UNION SELECT ...`, shell one-liners, <script> blocks), so the WAF also looks at
+        # the lines carrying a strong injection marker, whatever the route. For web_request bodies this
+        # matters too: the model reads only the first ~2000 characters of each value, so a payload behind
+        # 2 KB of hex/ID padding is invisible to it but not to the marker gate (measured: 4/4 padded
+        # payloads blocked, 0/21 ordinary bodies reach the model through the gate).
+        if direction == "outbound" and not any(r.blocked for r in results):
+            already = set(_waf_inputs(text)) if route == "web_request" else set()
+            gated = [g for g in waf_gate_parts(text) if g not in already]
             if gated:
                 results.append(model_web_attack("", parts=gated))
     # route == "code": secrets + PII + prompt-injection already cover the real
