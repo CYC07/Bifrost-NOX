@@ -25,11 +25,12 @@ from collections import Counter
 from urllib.parse import unquote
 
 from ml.waf.taxonomy import LABELS
-from dataset_tools.waf.v2 import benign, payloads, probes, shapes
+from dataset_tools.waf.v2 import benign, benign_real, payloads, probes, shapes
 
 _HERE = os.path.dirname(__file__)
 DATA_DIR = os.path.abspath(os.path.join(_HERE, "..", "data"))
 MAX_TEXT = 2048
+_REAL_BENIGN_SEED_OFFSET = 104729   # real-benign sampling has its own RNG stream; the main one is untouched
 EXTRA_SHAPES_PER_VALUE = 2
 HOLDOUT_FILE = "test_holdout.jsonl"
 _HOLDOUT_SEED_OFFSET = 7919       # the holdout wrapping has its own RNG stream; the main one is untouched
@@ -119,7 +120,8 @@ def _twin_key(text: str) -> str:
 
 
 def build(root: str, out_dir: str, seed: int = 42, n_clean: int = 36000, cap_per_attack: int = 9000,
-          include_local_pools: bool = True, denylist: tuple = (), holdout_source=None) -> dict:
+          include_local_pools: bool = True, denylist: tuple = (), holdout_source=None,
+          system_text_roots: tuple = ()) -> dict:      # opt-in: the CLI passes /usr/share, library callers/tests do not
     rng = random.Random(seed)
     os.makedirs(out_dir, exist_ok=True)
     holdout = _parse_holdout(holdout_source)
@@ -127,7 +129,10 @@ def build(root: str, out_dir: str, seed: int = 42, n_clean: int = 36000, cap_per
     if not holdout and os.path.exists(stale):
         os.remove(stale)         # a leftover from an earlier holdout build must not end up in this zip
 
-    attacks = payloads.load_attacks(root) + payloads.scanner_probes() + payloads.synth_ssti()
+    # crs before nuclei: on an exact-text collision the earlier record wins, so a held-out crs payload
+    # is never dropped in favour of a training copy (and vice versa never leaks: the copy is removed)
+    attacks = (payloads.load_attacks(root) + payloads.load_crs(root) + payloads.load_nuclei(root)
+               + payloads.scanner_probes() + payloads.synth_ssti())
     if include_local_pools:
         attacks += _local_attacks()
     by_label: dict[str, list[dict]] = {}
@@ -184,6 +189,14 @@ def build(root: str, out_dir: str, seed: int = 42, n_clean: int = 36000, cap_per
                 seen.add(t.lower())
                 values.append((t, "clean", "local:synth_benign_forms"))
                 native[t] = "native"
+
+    real_rng = random.Random(seed + _REAL_BENIGN_SEED_OFFSET)
+    for r in (benign_real.load_loghub(root, real_rng)
+              + benign_real.load_system_text(system_text_roots, real_rng, denylist)):
+        t = r["text"]
+        if t.lower() not in seen and not _denied(t, denylist) and len(t) <= MAX_TEXT:
+            seen.add(t.lower())
+            values.append((t, "clean", r["source"]))
 
     splits: dict[str, list[dict]] = {"train": [], "val": [], "test": [], "test_ood": []}
     for text, label, source in sorted(values):             # sorted -> deterministic
@@ -277,7 +290,10 @@ def _card(rep: dict) -> str:
              "- `scanner` is tiny and synthetic (tool user-agent strings); exclude it from ship gates.",
              "- `ssti` is partly synthetic (builtin:synth-ssti delimiter x expression grid); treat its recall as optimistic.",
              "- Kaggle archive.zip (payload_full.csv) was NOT used (needs credentials); public repos replace it.",
-             "- Clean values are synthetic (Faker + hand-written hard negatives) plus local public URL pools.",
+             "- Clean values are synthetic (Faker + hand-written hard negatives), local public URL pools, loghub log",
+             "  excerpts and real shell/config/HTML/JSON/markdown text from the build machine's /usr/share (a",
+             "  convenience corpus, not production traffic; secret-looking and denylisted files are dropped).",
+             "- Attack sources also include the OWASP CRS regression tests (crs) and Nuclei DAST payload lists (nuclei).",
              "- No captured lab traffic is included."]
     if "holdout" in rep:
         h = rep["holdout"]
@@ -313,11 +329,16 @@ def main() -> None:
     ap.add_argument("--holdout-source", default=None,
                     help="payload source to hold out entirely (repo prefix of the record source, e.g. fuzzdb); "
                          "writes test_holdout.jsonl and keeps that source out of every other split")
+    ap.add_argument("--system-text-roots", default=",".join(benign_real.DEFAULT_SYSTEM_ROOTS),
+                    help="comma-separated directories to sample real benign shell/config/HTML text from "
+                         "(empty disables)")
     ap.add_argument("--denylist", default=os.environ.get("WAF_V2_DENYLIST", ""),
                     help="comma-separated terms; any record containing one is dropped")
     a = ap.parse_args()
     deny = tuple(t.strip() for t in a.denylist.split(",") if t.strip())
-    rep = build(a.root, a.out, seed=a.seed, n_clean=a.n_clean, denylist=deny, holdout_source=a.holdout_source)
+    roots = tuple(t.strip() for t in a.system_text_roots.split(",") if t.strip())
+    rep = build(a.root, a.out, seed=a.seed, n_clean=a.n_clean, denylist=deny, holdout_source=a.holdout_source,
+                system_text_roots=roots)
     print(json.dumps(rep, indent=1))
     print("zip:", make_zip(a.out))
 

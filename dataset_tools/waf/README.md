@@ -85,13 +85,18 @@ judges two arms with ship gates that do not depend on the training generators:
 
 Run all commands from the repo root with the venv active (`PYTHONPATH=.`).
 
-**1. Build the dataset (once).** Needs the public payload clones in `~/FYP/waf_datasets/{patt,seclists,fuzzdb}` and the
-local pools in `dataset_tools/waf/data/`. Hold out one whole payload source so recall can be measured on payloads the
-training corpus never contained, and pass your deny-list so no engagement/customer string enters the data:
+**1. Build the dataset (once).** Needs the public clones in `~/FYP/waf_datasets/` (each in its own directory, read as text
+only, never executed): attack payloads from `patt` (PayloadsAllTheThings), `seclists`, `fuzzdb`, `crs` (OWASP Core Rule Set:
+its regression tests and `rules/*.data` lists) and `nuclei` (nuclei-templates, sparse checkout of `dast/vulnerabilities`,
+`http/vulnerabilities`, `http/fuzzing`); real benign log lines from `loghub` (logpai/loghub); plus the local pools in
+`dataset_tools/waf/data/`. Real benign shell/config/HTML/JSON/markdown text is sampled from `/usr/share` (secret-looking
+and denylisted files are dropped; change the roots with `--system-text-roots`, empty disables). Hold out whole payload
+sources (`fuzzdb,crs`) so recall can be measured on payloads the training corpus never contained, and pass your deny-list so
+no engagement/customer string enters the data:
 
 ```bash
 WAF_V2_DENYLIST="term1,term2" python -m dataset_tools.waf.v2.build \
-    --root ~/FYP/waf_datasets --out ~/FYP/waf_datasets/build_v2 --holdout-source fuzzdb
+    --root ~/FYP/waf_datasets --out ~/FYP/waf_datasets/build_v2 --holdout-source fuzzdb,crs
 ```
 
 This writes `train/val/test/test_ood/test_holdout.jsonl`, `DATASET_CARD.md` and `dataset_v2.zip`. `test_holdout.jsonl`
@@ -153,8 +158,9 @@ fails open (the WAF is disabled with a logged error), it is never guessed to be 
 
 **What these gates cannot tell you.** The held-out source is free of exact duplicates and of percent-decoded / re-cased /
 re-spaced twins of training payloads (those are dropped; the dataset card says how many), but not of looser paraphrases
-across repos; `ssti` and `scanner` have no (or only synthetic) held-out payloads and `path_traversal` has only a handful
-of unique held-out values, so those recalls are unmeasured here (xss is ~60% of the held-out attack rows); the
+across repos. With `fuzzdb,crs` held out the build (2026-11-05) has these UNIQUE held-out attack payloads: command_injection
+793, sqli 778, xss 434, scanner 85, path_traversal 48, ssti 17 (before adding `crs`: 97 / 74 / 313 / 1 / 4 / 1), so the
+`ssti` recall in particular is still a small-sample estimate; the
 independent probes and benign bodies are small hand-written sets (a 2% budget on ~135 clean rows is 2 rows); and every
 number is for the model's decision rule in isolation or in the replay - live traffic, other sensors in the gateway and
 latency are not covered.
