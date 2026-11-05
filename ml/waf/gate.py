@@ -54,6 +54,7 @@ _STRONG = re.compile(
     |\{\{[^}\n]{0,200}(?:__\w+__|\bconfig\b|\bself\b|lipsum|cycler|\brequest\b|\d+\s*\*\s*\d+)[^}\n]{0,200}\}\}
     |\$\{[^}\n]{0,200}(?:\d+\s*\*\s*\d+|Runtime|exec|__\w+__|System)[^}\n]{0,200}\}
     |<%=?[^%\n]{0,200}%>|\{%[^%\n]{0,200}%\}|\#\{[^}\n]{0,100}\}
+    |<\#assign\b[^>\n]{0,200}\?new\s*\(|freemarker\.template\.utility\.Execute
     """,
     re.I | re.X,
 )
@@ -68,14 +69,22 @@ def _decode(s: str) -> str:
     return _t._decode(s) if "%" in s or "+" in s else s
 
 
-def waf_gate_parts(text: str) -> list[str]:
-    """Lines (decoded, capped) of `text` that carry a strong injection marker; [] if none."""
-    if not text:
-        return []
-    s = text[:MAX_SCAN_CHARS]
-    if "%" in s:
-        s = _decode(s)
-    parts: list[str] = []
+_UNION_ML = re.compile(r"\bunion\b[\s/*()+]+(?:all[\s/*()+]+|distinct[\s/*()+]+)?select\b", re.I)
+_VERSION_COMMENT = re.compile(r"/\*!\d{0,6}(.{0,200}?)\*/", re.S)     # MySQL executes the body: /*!50000UNION*/
+_COMMENT = re.compile(r"/\*.{0,100}?\*/", re.S)
+
+
+def _sql_variants(v: str):
+    """The text as a SQL engine (or a comment-stripping filter in front of it) may read it. The raw text is
+    yielded first because UNION and SELECT may sit on different lines (the per-line scan cannot see that)."""
+    yield v
+    if "/*" in v:
+        unwrapped = _VERSION_COMMENT.sub(r" \1 ", v)
+        yield _COMMENT.sub(" ", unwrapped)       # comment as whitespace:  UNION/**/SELECT
+        yield _COMMENT.sub("", unwrapped)        # comment stripped:        UN/**/ION
+
+
+def _scan_lines(s: str, parts: list[str]) -> None:
     for line in s.splitlines() or [s]:
         for seg in (line.split("&") if "=" in line and "&" in line and len(line) < MAX_LINE else [line]):
             m = _STRONG.search(seg[: 4 * MAX_LINE])
@@ -85,7 +94,39 @@ def waf_gate_parts(text: str) -> list[str]:
             val = seg[lo: lo + MAX_LINE]
             if "=" in val[:60] and len(val) < MAX_LINE and re.match(r"^[\w.\[\]-]{1,40}=", val):
                 val = val.split("=", 1)[1]  # score the value, as for query targets
-            parts.append(val.strip())
+            val = val.strip()
+            if val and val not in parts:
+                parts.append(val)
             if len(parts) >= MAX_PARTS:
-                return parts
+                return
+
+
+def waf_gate_parts(text: str) -> list[str]:
+    """Lines (decoded, capped) of `text` that carry a strong injection marker; [] if none.
+
+    Looked at: the percent-decoded text AND the raw text (markers such as %c0%af vanish when decoded); for an
+    oversize body the first and last half of the scan window (padding cannot push a payload past the end);
+    and, when nothing matched line by line, SQL-normalised variants (UNION/SELECT across lines, comments used
+    as whitespace, MySQL /*!50000..*/ version comments)."""
+    if not text:
+        return []
+    s = text if len(text) <= MAX_SCAN_CHARS else text[: MAX_SCAN_CHARS // 2] + "\n" + text[-MAX_SCAN_CHARS // 2:]
+    views = [_decode(s), s] if "%" in s else [s]
+    if len(views) == 2 and views[0] == views[1]:
+        views = views[:1]
+    parts: list[str] = []
+    for v in views:
+        _scan_lines(v, parts)
+        if len(parts) >= MAX_PARTS:
+            return parts
+    if not parts and ("/*" in s or re.search(r"union", s, re.I)):
+        for v in views:
+            for variant in _sql_variants(v):
+                _scan_lines(variant, parts)
+                m = _UNION_ML.search(variant)
+                if m and len(parts) < MAX_PARTS:
+                    lo = max(0, m.start() - 300)
+                    parts.append(variant[lo: lo + MAX_LINE].strip())
+                if parts:
+                    return parts
     return parts
