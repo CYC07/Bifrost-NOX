@@ -31,17 +31,27 @@ _ACTIVE = re.compile(
     r"""\b(?:or|and)\s+\d+\s*=\s*\d+|\border\s+by\s+\d+\b|\bhaving\s+\d+\s*=|/\*""",
     re.I,
 )
-_PLAIN_URL = re.compile(r"""^(?:https?|ftp)://[^\s'"<>`;|{}\\]+$""", re.I)
+_PLAIN_URL = re.compile(r"""^(?!.*\$[({])(?:https?|ftp)://[^\s'"<>`;|{}\\]+$""", re.I)
 _TRAVERSAL = re.compile(
-    r"(?:\.\.[/\\]+){2,}|(?:^|[/\\])\.\.[/\\]+(?:etc|windows|winnt|boot|proc|root|home|var)\b", re.I)
+    r"(?:\.\.[/\\]+){2,}"                          # ../../
+    r"|(?:\.{2,8}[/\\]{1,4}){2,}"                  # ....//....//  (survives a one-pass '../' strip); bounded = linear time
+    r"|(?:\ufffd{2,8}[/\\]{1,4}){2,}"              # overlong UTF-8 dots (%c0%ae%c0%ae/) decode to U+FFFD
+    r"|(?:^|[/\\])\.\.[/\\]+(?:etc|windows|winnt|boot|proc|root|home|var)\b", re.I)
+# a sensitive file only counts as a whole path segment (so /docs/etc/hosts-file-explained is not one)
 _SENSITIVE = re.compile(
-    r"(?:^|[/\\=:])(?:etc[/\\]+(?:passwd|shadow|group|hosts)|windows[/\\]+win\.ini|boot\.ini|"
-    r"proc[/\\]+self[/\\]+environ)\b", re.I)
+    r"(?:^|[/\\=:])(?:"
+    r"etc[/\\]+(?:passwd|shadow|group|hosts|sudoers|hostname|fstab|crontab)(?![\w-])"
+    r"|proc[/\\]+self[/\\]+(?:environ|cmdline|maps|status)(?![\w-])"
+    r"|var[/\\]+log[/\\]+(?:auth\.log|secure|syslog|messages)(?![\w-])"
+    r"|(?:root[/\\]+)?\.ssh[/\\]+(?:id_rsa|id_dsa|id_ecdsa|id_ed25519|authorized_keys)(?![\w-])"
+    r"|windows[/\\]+win\.ini(?![\w-])|windows[/\\]+system32[/\\]+config[/\\]+(?:sam|system|security)(?![\w-])"
+    r"|boot\.ini(?![\w-])|web-inf[/\\]+web\.xml(?![\w-])|\.git[/\\]+(?:config|head)(?![\w-])|\.env(?![\w-])"
+    r")", re.I)
 
 
 def _decode(s: str) -> str:
-    """Percent-decode up to twice (catches %252e%252e%252f); '+' becomes a space."""
-    for _ in range(2):
+    """Percent-decode until stable, at most 4 layers (catches %252e%252e%252f and triple encoding); '+' becomes a space."""
+    for _ in range(4):
         d = unquote_plus(s)
         if d == s:
             break
@@ -98,10 +108,30 @@ def _prioritise(parts: list[str]) -> list[str]:
     return (strong + rest)[:MAX_VALUES]
 
 
+def _name_and_path_parts(path: str, query: str) -> list[str]:
+    """Parameter NAMES and decoded path segments, kept only when they carry a strong injection marker: servers
+    read both as input too, but inspecting every ordinary name/segment would cost precision."""
+    from ml.waf.gate import has_strong_marker   # lazy: gate imports this module
+    out: list[str] = []
+    for part in query.split("&"):
+        name, eq, _ = part.partition("=")
+        if eq and name:
+            n = _decode(name)
+            if has_strong_marker(n):
+                out.append(n[:MAX_VALUE_CHARS])
+    for seg in path.split("/"):
+        if seg:
+            d = decode_text(seg)
+            if has_strong_marker(d):
+                out.append(d[:MAX_VALUE_CHARS])
+    return out
+
+
 def waf_values(target: str) -> list[str]:
-    """Decoded query values that deserve a WAF-model look (active, not a plain URL), ranked, capped."""
-    _, query = _split(target)
-    keep: list[str] = []
+    """Decoded query values that deserve a WAF-model look (active, not a plain URL), ranked, capped.
+    Also parameter names and path segments that carry a strong injection marker."""
+    path, query = _split(target)
+    keep: list[str] = _name_and_path_parts(path, query)
     for v in _values(query):
         if not v.strip() or _PLAIN_URL.match(v) or not _ACTIVE.search(v):
             continue
@@ -113,7 +143,7 @@ def waf_values(target: str) -> list[str]:
 
 _ESCAPE = re.compile(r"%[0-9a-fA-F]{2}")
 _PATH_PREFIX = re.compile(r"^[^\s=&?#]*\?")
-_FORM_START = re.compile(r"^[\w.\[\]-]{1,64}=")
+_FORM_START = re.compile(r"^[\w.\[\]-]{1,128}=")
 
 
 def worth_scoring(v: str) -> bool:
@@ -134,9 +164,9 @@ def has_escapes(s: str) -> bool:
 
 
 def decode_text(s: str) -> str:
-    """Percent-decode up to twice WITHOUT turning '+' into a space (free text keeps its '+')."""
+    """Percent-decode until stable (at most 4 layers) WITHOUT turning '+' into a space (free text keeps its '+')."""
     from urllib.parse import unquote
-    for _ in range(2):
+    for _ in range(4):
         d = unquote(s, errors="replace")
         if d == s:
             break
@@ -146,7 +176,7 @@ def decode_text(s: str) -> str:
 
 def _form_part(body: str) -> str | None:
     """The `k=v&k=v` part of a body (a leading `/path?` is dropped), or None if not form-shaped."""
-    t = (body or "")[:_MAX_TARGET]
+    t = (body or "")[:_MAX_TARGET].lstrip("&\r\n\t ")
     m = _PATH_PREFIX.match(t)
     if m:
         t = t[m.end():]

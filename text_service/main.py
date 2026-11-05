@@ -276,7 +276,9 @@ def _waf_inputs(text: str) -> list[str]:
         if len(leaves) >= _WAF_MAX_LEAVES:
             return
         if isinstance(o, dict):
-            for v in o.values():
+            for k, v in o.items():
+                if isinstance(k, str) and has_strong_marker(k):      # keys are input too (precision first: marker only)
+                    leaves.append((k.strip(), True))
                 walk(v)
         elif isinstance(o, list):
             for v in o:
