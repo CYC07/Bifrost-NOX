@@ -59,6 +59,11 @@ _STRONG = re.compile(
 )
 
 
+def has_strong_marker(text: str) -> bool:
+    """Does `text` carry a strong injection marker (cheap, regex only)?"""
+    return bool(text) and bool(_STRONG.search(text[: 4 * MAX_LINE]))
+
+
 def _decode(s: str) -> str:
     return _t._decode(s) if "%" in s or "+" in s else s
 
