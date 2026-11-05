@@ -28,10 +28,6 @@ GAPS = [
          fix="v2 retrain; the new held-out set (crs+fuzzdb) measures exactly this."),
 
     # ---------------------------------------------------------------- service hook (text_service/main.py)
-    dict(id="S3", pattern=r"test_audit_service\.py::test_payload_in_a_json_key",
-         module="text_service hook", stage="input selection (_waf_inputs)", severity="medium",
-         why="only JSON values are walked; object keys are never offered to the model.",
-         fix="include keys in the walk."),
     dict(id="S4", pattern=r"test_audit_robustness\.py::test_pipeline_does_not_raise_on_non_string_input",
          module="text_service endpoint", stage="request parsing", severity="low",
          why="analyze_text does len(text) on whatever 'text' the JSON holds; None/number/list/dict raise inside the handler (HTTP 500, the gateway then fails open). "
@@ -39,32 +35,6 @@ GAPS = [
          fix="coerce or reject non-string 'text' with a 400 before analysis."),
 
     # ---------------------------------------------------------------- target pre-filter (ml/waf/target.py)
-    dict(id="T3", pattern=r"test_audit_target\.py::test_(parameter_names_are_inspected_too|payload_hidden_in_the_url_path_is_inspected)",
-         module="ml/waf/target.py", stage="what is inspected", severity="medium",
-         why="only query VALUES are examined; parameter names and URL path segments carrying an injection (/user/1' OR '1'='1/profile, ?<script>=1) are ignored (path gets traversal signatures only).",
-         fix="scan names and path segments with the same active-character filter."),
-    dict(id="T4", pattern=r"test_audit_target\.py::test_command_substitution_inside_a_url_valued_parameter",
-         module="ml/waf/target.py", stage="pre-filter (_PLAIN_URL)", severity="medium",
-         why="_PLAIN_URL allows '$', '(' and ')' so http://a.example/$(id) is treated as an ordinary URL and skipped.",
-         fix="exclude $( , ` and ( ) from the plain-URL character class."),
-    dict(id="T5", pattern=r"test_audit_target\.py::test_(form_with_leading|form_key_longer)",
-         module="ml/waf/target.py", stage="form detection (_FORM_START)", severity="low",
-         why="a body that starts with '&' or a newline, or whose first key is over 64 characters, is not recognised as a form so its values are not split and decoded.",
-         fix="strip leading separators; allow longer keys."),
-    dict(id="T6", pattern=r"test_audit_target\.py::test_traversal_variants_and_adjacent_sensitive_files_are_caught\[(?!/f\?p=\.\.%252f)",
-         module="ml/waf/target.py", stage="signature_hits", severity="medium",
-         why="the sensitive-file list is short (etc/passwd|shadow|group|hosts, win.ini, boot.ini, proc/self/environ). Nested '....//', overlong UTF-8 dots, "
-             ".ssh/id_rsa, auth.log, sudoers, SAM, web.xml, .git/config and .env are not caught.",
-         fix="extend _SENSITIVE and _TRAVERSAL from the SecLists LFI lists."),
-    dict(id="T7", pattern=r"test_audit_target\.py::test_documentation_page_about_the_hosts_file",
-         module="ml/waf/target.py", stage="signature_hits", severity="low",
-         why="'/docs/etc/hosts-file-explained' matches the etc/hosts signature (a path segment named etc followed by hosts) - a false positive on a documentation URL.",
-         fix="require the match to be the whole segment or follow a traversal."),
-    dict(id="T8", pattern=r"test_audit_target\.py::test_decode_reaches_a_fixpoint",
-         module="ml/waf/target.py", stage="_decode", severity="low",
-         why="decodes at most twice; triple-encoded %25252e%25252e%25252f stays encoded.",
-         fix="decode until stable (bounded at 4)."),
-
     # ---------------------------------------------------------------- marker gate (ml/waf/gate.py)
     dict(id="G1", pattern=r"test_audit_gate\.py::test_obfuscated_variants_are_still_routed\[(newline as space|split by inline comments|mysql version comment)",
          module="ml/waf/gate.py", stage="marker regex", severity="medium",
