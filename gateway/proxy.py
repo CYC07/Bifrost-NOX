@@ -13,6 +13,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from common.utils import FileSniffer, setup_logging
 from common.trusted_domains import is_trusted_connection
 from common.multipart import extract_file_parts
+from ml.waf.scanner import scanner_policy, scanner_signature
 from ml.waf.target import is_interesting as target_is_interesting
 
 # Setup Logging
@@ -114,6 +115,17 @@ class IDPInspector:
             names.append(server_name)
         if is_trusted_connection(names, dest_ip):
             return "allow"
+
+        # Scanner / recon tools announce themselves in request headers (User-Agent, Acunetix-Aspect, ...) which
+        # no analyzer ever sees; a precise name list catches them deterministically (ml/waf/scanner.py).
+        # SCANNER_UA_POLICY: block (default) | advisory (log only) | off.
+        if direction == "outbound" and scanner_policy() != "off":
+            tool = scanner_signature(headers)
+            if tool:
+                if scanner_policy() == "block":
+                    logger.warning(f"BLOCK: scanner tool '{tool}' ({src_ip} -> {dst_ip}:{dst_port} {method} {host}).")
+                    return "block"
+                logger.warning(f"ADVISORY: scanner tool '{tool}' ({src_ip} -> {dst_ip}:{dst_port} {method} {host}).")
 
         # Request target (path + query string). Attacks there (SQLi/XSS/traversal in a GET) were
         # never inspected: only bodies were, so they were only ever caught by accident via the

@@ -228,6 +228,7 @@ All settings are environment variables. `start_all.sh` sources a `.env` in the p
 | `WAF_MODEL_PATH` | `ml/waf/artifacts/waf_distilbert` | joblib file or HF directory |
 | `PROMPT_INJECTION_THRESHOLD` | `0.9` | injection-model block cutoff (LLM traffic only) |
 | `PII_MIN_SCORE` | `0.4` | minimum Presidio confidence for an SSN/IBAN/card match to count |
+| `SCANNER_UA_POLICY` | `block` | known scanner/exploit tool in the User-Agent: `block`, `advisory` (log only), `off` |
 | `DOC_SCAN_MODE` | `advisory` | `advisory` (document-service block shown as a warning), `block` (enforce), `off` (legacy route) |
 | `DOC_SCAN_MAX_BYTES` | `20971520` | documents larger than this are allowed unanalysed |
 | `TRUSTED_VERIFY_IP` | `1` | require a trusted-domain connection to land in Microsoft's IP ranges (`0` = name-only) |
@@ -375,7 +376,7 @@ ai_firewall/
 
 ## Known limitations
 
-- **Request targets and bodies only.** Headers (cookies, `User-Agent`) and WebSocket frames are not inspected.
+- **Request targets and bodies, plus scanner fingerprints.** Cookies and other headers and WebSocket frames are not inspected; the one exception is the `User-Agent` (and the scanner-only `Acunetix-Aspect*` / `X-Scan-Memo` headers), matched against a list of known scanner and exploit tools (`ml/waf/scanner.py`). Measured: 68 of 84 real scanner names recognised (38% before the list was extended with names from the misses, so the 81% is in-sample), 0 false positives on 22,609 real browser/client user-agents. The WAF model's own `scanner` class is weak and never sees headers.
 - **Pinned clients** (apps and SDKs that ignore the system CA store) cannot be inspected; they are blocked or allowlisted.
 - **Traffic that never crosses the network** (a local LLM on the same machine) is invisible to a network firewall.
 - **Model false positives remain** in places: the WAF on benign shell commands, HTML, logs and config text, and the prompt-injection model on page-like text (login pages) and on ordinary sentences such as "ignore the typos in my message". They are tracked as open issues rather than hidden by thresholds.
