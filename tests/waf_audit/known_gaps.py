@@ -18,9 +18,9 @@ GAPS = [
          fix="Retrain on the shape-balanced v2 set (build_v2, now with real benign shell/config/HTML/logs); gate on benign FP <= 2%."),
     dict(id="M2", pattern=r"test_audit_(predictor|e2e)\.py::test_(real_model_(blocks_canonical_payloads_of_each_class|names_the_right_class_when_it_blocks)\[scanner\]|recall_by_class_and_carrier\[scanner|recall_on_real_held_out_payloads\[scanner)",
          module="model (v1 DistilBERT)", stage="model decision", severity="low",
-         why="the scanner class is barely learned (canonical 25%, real held-out 5-17%; sqlmap's User-Agent is called sqli). "
-             "It also cannot matter in production: the WAF never sees request headers, only bodies and targets.",
-         fix="Either inspect the User-Agent header at the gateway, or drop the class; v2 builder now has 85 real held-out scanner strings to measure it."),
+         why="the MODEL's scanner class is barely learned (canonical 25%, real held-out 5-17%; sqlmap's User-Agent is called sqli) and it never sees request headers. "
+             "Production scanner detection is now done at the gateway from the User-Agent (ml/waf/scanner.py, tests/test_scanner_ua.py); these tests measure the model only.",
+         fix="v2 retrain may improve the model class; the gateway detector already covers the real-world case."),
     dict(id="M3", pattern=r"test_audit_e2e\.py::test_recall_on_real_held_out_payloads\[(path_traversal|command_injection)-bare\]",
          module="model (v1 DistilBERT)", stage="model decision", severity="medium",
          why="recall on real payloads the model never trained on: path_traversal 64%, command_injection 78% (target 80%). "
