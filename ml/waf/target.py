@@ -103,8 +103,9 @@ def _prioritise(parts: list[str]) -> list[str]:
     """Strong-marker parts first (stable), then the rest, capped at MAX_VALUES: harmless-but-active padding
     (O'Brien, prices, code comments) must not push the real payload past the cap."""
     from ml.waf.gate import has_strong_marker   # lazy: gate imports this module
-    strong = [p for p in parts if has_strong_marker(p)]
-    rest = [p for p in parts if not has_strong_marker(p)]
+    flags = [has_strong_marker(p[:MAX_VALUE_CHARS]) for p in parts]          # once per part, on the part's first 2000 chars
+    strong = [p for p, f in zip(parts, flags) if f]
+    rest = [p for p, f in zip(parts, flags) if not f]
     return (strong + rest)[:MAX_VALUES]
 
 
