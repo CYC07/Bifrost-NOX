@@ -333,6 +333,7 @@ class TransparentProxy:
                 server_name=server_name, dest_ip=dest_ip,
                 method=(getattr(parser, "method", "") or "") if direction == "outbound" else "",
                 path=(getattr(parser, "path", "") or "") if direction == "outbound" else "",
+                status=(getattr(parser, "status", 0) or 0) if direction == "inbound" else 0,
             )
             if verdict == "block":
                 # Always inform the client, whichever direction tripped.
