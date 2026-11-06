@@ -34,10 +34,10 @@ _STRONG = re.compile(
     |'\s*(?:--|\#)(?:\s|$)|'\s*/\*|"\s*--\s*$
     |\bselect\b[^\n]{1,80}\bfrom\b[^\n]{0,80}\bwhere\b[^\n]{0,80}['"]?\s*(?:or|and)\b\s*['"\d]
     # --- XSS
-    |<\s*script\b[^>]{0,200}\bsrc\s*=\s*['"]?(?:https?:)?//
-    |<\s*script[^>]{0,100}>\s*(?:alert|prompt|confirm|eval|document\.(?:cookie|location|write)|window\.location|fetch|new\s+Image|String\.fromCharCode)
+    |<\s*script\b[^<>]{0,200}\bsrc\s*=\s*['"]?(?:https?:)?//
+    |<\s*script[^<>]{0,100}>\s*(?:alert|prompt|confirm|eval|document\.(?:cookie|location|write)|window\.location|fetch|new\s+Image|String\.fromCharCode)
     |\b(?:alert|prompt|confirm)\s*\(\s*[\d'"`/]|\bdocument\.(?:cookie|location|domain)\b
-    |<\s*(?:img|svg|iframe|body|details|marquee|video|audio|input|object|embed|style|form|a|div|button|select|textarea)\b[^>]{0,200}\bon[a-z]{3,20}\s*=\s*["']?[^>]{0,40}(?:alert|prompt|confirm|eval|document\.|fetch|location|\(\s*1\s*\)|String\.|constructor|\bx\b)
+    |<\s*(?:img|svg|iframe|body|details|marquee|video|audio|input|object|embed|style|form|a|div|button|select|textarea)\b[^<>]{0,200}\bon[a-z]{3,20}\s*=\s*["']?[^>]{0,40}(?:alert|prompt|confirm|eval|document\.|fetch|location|\(\s*1\s*\)|String\.|constructor|\bx\b)
     |\bjavascript\s*:\s*(?!void\b)\w+
     |\bonerror\s*=
     # --- traversal / sensitive files
@@ -51,8 +51,8 @@ _STRONG = re.compile(
     |\$\{?IFS\}?
     |(?<!\#!)/bin/(?:ba|z)?sh\b|\bnc\s+(?:-\w+\s+)*[\w.-]+\s+\d{2,5}\b|\b(?:bash|sh)\s+-i\b
     # --- SSTI
-    |\{\{[^}\n]{0,200}(?:__\w+__|\bconfig\b|\bself\b|lipsum|cycler|\brequest\b|\d+\s*\*\s*\d+)[^}\n]{0,200}\}\}
-    |\$\{[^}\n]{0,200}(?:\d+\s*\*\s*\d+|Runtime|exec|__\w+__|System)[^}\n]{0,200}\}
+    |\{\{(?!\{)(?=[^}\n]{0,200}+\}\})[^}\n]{0,200}(?:__\w+__|\bconfig\b|\bself\b|lipsum|cycler|\brequest\b|\d+\s*\*\s*\d+)[^}\n]{0,200}\}\}
+    |\$\{(?=[^}\n]{0,200}+\})[^}\n]{0,200}(?:\d+\s*\*\s*\d+|Runtime|exec|__\w+__|System)[^}\n]{0,200}\}
     |<%=?[^%\n]{0,200}%>|\{%[^%\n]{0,200}%\}|\#\{[^}\n]{0,100}\}
     |<\#assign\b[^>\n]{0,200}\?new\s*\(|freemarker\.template\.utility\.Execute
     """,
