@@ -13,6 +13,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from common.utils import FileSniffer, setup_logging
 from common.trusted_domains import is_trusted_connection
 from common.multipart import extract_file_parts
+from ml.waf.behaviour import ScannerTracker, scanner_behaviour_policy
 from ml.waf.scanner import scanner_policy, scanner_signature
 from ml.waf.target import is_interesting as target_is_interesting
 
@@ -61,6 +62,8 @@ MASTER_LOG_URL = "http://localhost:8000/log_event"
 class IDPInspector:
     def __init__(self):
         self.client = httpx.AsyncClient()
+        # per (client, host) record of what the server said to the client's requests (scanner behaviour)
+        self.scanner_tracker = ScannerTracker()
 
     async def log_connection(self, src_ip, dst_ip, dst_port, is_tls, host):
         """Fire-and-forget connection-level event so the dashboard shows
@@ -103,7 +106,7 @@ class IDPInspector:
             pass
 
     async def inspect_full(self, headers, body, direction, is_https, src_ip="unknown", dst_ip="unknown", dst_port="",
-                           host="", method="", path="", server_name="", dest_ip=""):
+                           host="", method="", path="", server_name="", dest_ip="", status=0):
         """Called when a full HTTP message is captured. host/method/path give the
         analysis context (e.g. to tell LLM API traffic from ordinary web traffic)."""
         # Trusted-domain policy (config/trusted_domains.json): Windows/Microsoft infrastructure is
@@ -126,6 +129,23 @@ class IDPInspector:
                     logger.warning(f"BLOCK: scanner tool '{tool}' ({src_ip} -> {dst_ip}:{dst_port} {method} {host}).")
                     return "block"
                 logger.warning(f"ADVISORY: scanner tool '{tool}' ({src_ip} -> {dst_ip}:{dst_port} {method} {host}).")
+
+        # Scanner BEHAVIOUR (works even when the User-Agent is spoofed): a client whose requests to one host mostly
+        # return 404/403 across many different paths is enumerating it. Responses feed the tracker (inbound), the
+        # next request from a flagged client is refused for a cooldown. SCANNER_BEHAVIOUR_POLICY: block (default) |
+        # advisory (log only) | off. Other clients and other hosts are never affected.
+        if scanner_behaviour_policy() != "off":
+            site = host or server_name or dest_ip
+            if direction == "inbound":
+                self.scanner_tracker.observe_response(dst_ip, site, status)
+            else:
+                why = self.scanner_tracker.blocked(src_ip, site)
+                if why:
+                    if scanner_behaviour_policy() == "block":
+                        logger.warning(f"BLOCK: scanner behaviour ({src_ip} -> {site}): {why}.")
+                        return "block"
+                    logger.warning(f"ADVISORY: scanner behaviour ({src_ip} -> {site}): {why}.")
+                self.scanner_tracker.observe_request(src_ip, site, path)
 
         # Request target (path + query string). Attacks there (SQLi/XSS/traversal in a GET) were
         # never inspected: only bodies were, so they were only ever caught by accident via the
