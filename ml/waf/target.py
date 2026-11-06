@@ -231,4 +231,5 @@ def secret_hits(target: str) -> list[str]:
 
 def is_interesting(target: str) -> bool:
     """Cheap gateway pre-filter: does this target need analysis at all?"""
-    return bool(signature_hits(target) or waf_values(target) or secret_hits(target))
+    from ml.waf.signatures import signature_hits as attack_signatures   # lazy: signatures imports this module
+    return bool(signature_hits(target) or waf_values(target) or secret_hits(target) or attack_signatures(target))

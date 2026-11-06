@@ -32,6 +32,7 @@ from ml.prompt_injection.prompts import extract_prompts, extract_segments
 from common import llm_scope
 from ml.waf import target as request_target
 from ml.waf.gate import has_strong_marker, waf_gate_parts
+from ml.waf.signatures import signature_hits, signature_policy
 
 setup_logging("text_service")
 logger = logging.getLogger("text_service")
@@ -470,6 +471,25 @@ def _analyze_cached(text: str, in_scope: bool = False, direction: str = "outboun
     return result
 
 
+_SIG_CRITICAL = {"jndi", "deserialization", "shellshock"}
+
+
+def _signature_result(text: str):
+    """Attack classes outside the WAF model's taxonomy (ml/waf/signatures.py): SSRF, XXE, CRLF, NoSQLi, JNDI,
+    deserialization, Shellshock, prototype pollution, LDAP, SSI. None when nothing matched or the policy is off."""
+    policy = signature_policy()
+    if policy == "off":
+        return None
+    hits = signature_hits(text)
+    if not hits:
+        return None
+    findings = [f"Attack signature: {', '.join(hits)}"]
+    if policy == "advisory":
+        return AnalysisResult(module="web_signature", score=0.5, findings=findings, risk=RiskLevel.LOW, raw_data={"advisory": True})
+    return AnalysisResult(module="web_signature", score=1.0, findings=findings, blocked=True,
+                          risk=RiskLevel.CRITICAL if _SIG_CRITICAL & set(hits) else RiskLevel.HIGH)
+
+
 def _as_text(x) -> str:
     """Coerce whatever arrived as `text` to a string: None -> "", bytes -> utf-8, dict/list -> compact JSON, other -> str().
     A non-string must neither crash the analysis nor skip it (the gateway fails open on a 500)."""
@@ -496,6 +516,10 @@ def _analyze_sync(text: str, in_scope: bool = False, direction: str = "outbound"
     # sensitive-content and web_attack are the only analyzers the router gates.
     route = _route(text)
     results = [model_code_analysis(text, direction), model_patterns(text, direction), model_pi_signatures(text, in_scope)]
+    if direction == "outbound" and not in_scope:
+        sig_result = _signature_result(text)
+        if sig_result is not None:
+            results.append(sig_result)
     # Expensive analyzers run last and only if nothing has blocked yet: the verdict
     # is an OR of block decisions, so once one has fired, running a slower analyzer
     # can only add findings, not change the outcome.
@@ -554,6 +578,9 @@ def _analyze_target(target: str) -> dict:
     # Secrets in the URL: same policy as bodies (vendor secrets block, JWT/Google key/generic are
     # advisory — a JWT in an SSO callback or magic link is normal).
     results.append(model_code_analysis(request_target.decoded(target), "outbound"))
+    sig_result = _signature_result(target)
+    if sig_result is not None:
+        results.append(sig_result)
     values = request_target.waf_values(target)
     if values and not any(r.blocked for r in results):
         results.append(model_web_attack("", parts=values))
