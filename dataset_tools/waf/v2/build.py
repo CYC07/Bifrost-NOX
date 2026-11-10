@@ -192,7 +192,11 @@ def build(root: str, out_dir: str, seed: int = 42, n_clean: int = 36000, cap_per
 
     real_rng = random.Random(seed + _REAL_BENIGN_SEED_OFFSET)
     for r in (benign_real.load_loghub(root, real_rng)
-              + benign_real.load_system_text(system_text_roots, real_rng, denylist)):
+              + benign_real.load_system_text(system_text_roots, real_rng, denylist)
+              + benign_real.load_tldr(root, real_rng, denylist)
+              + benign_real.load_mdn_examples(root, real_rng, denylist)
+              + benign_real.load_awesome_compose(root, real_rng, denylist)
+              + benign_real.load_sql_create_context(root, real_rng, denylist)):
         t = r["text"]
         if t.lower() not in seen and not _denied(t, denylist) and len(t) <= MAX_TEXT:
             seen.add(t.lower())
