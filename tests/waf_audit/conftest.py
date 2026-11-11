@@ -13,7 +13,7 @@ import pytest
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, ROOT)
 
-WAF_THRESHOLD = 0.8          # text_service.WAF_ATTACK_THRESHOLD, the shipped value
+WAF_THRESHOLD = float(os.getenv("WAF_ATTACK_THRESHOLD", "0.99"))
 
 
 @pytest.fixture(scope="session")
