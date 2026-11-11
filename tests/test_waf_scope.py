@@ -176,8 +176,6 @@ def test_real_model_still_blocks_json_wrapped_attacks(real_waf, obj):
 
 
 @needs_waf
-@pytest.mark.xfail(strict=True, reason=(
-    "KNOWN MODEL GAP (needs retraining with hard negatives): values containing a URL or an apostrophe+ampersand "
-    "('O'Brien & Sons', 'http://host/path') are still flagged. See WAF analysis in memory."))
 def test_real_model_residual_false_positives_documented(real_waf):
+    # Resolved in v3: harmless company names with apostrophes and clean redirect URLs are no longer blocked.
     assert not svc.model_web_attack(json.dumps({"title": "O'Brien & Sons", "redirect": "https://example.com/account?tab=settings"})).blocked

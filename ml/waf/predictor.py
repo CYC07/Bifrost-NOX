@@ -28,8 +28,10 @@ import json
 import logging
 import math
 import os
+import string
 from dataclasses import dataclass, field
 
+from ml.waf.target import _PLAIN_URL, worth_scoring
 from ml.waf.taxonomy import ATTACK_LABELS, RISK, is_attack
 
 logger = logging.getLogger("waf.predictor")
@@ -38,7 +40,7 @@ _HERE = os.path.dirname(__file__)
 DEFAULT_MODEL_PATH = os.getenv(
     "WAF_MODEL_PATH", os.path.join(_HERE, "artifacts", "waf_distilbert")
 )
-DEFAULT_THRESHOLD = float(os.getenv("WAF_THRESHOLD", "0.5"))
+DEFAULT_THRESHOLD = float(os.getenv("WAF_ATTACK_THRESHOLD", os.getenv("WAF_THRESHOLD", "0.99")))
 # Must match the tokenizer max_length used in Colab fine-tuning.
 TRANSFORMER_MAX_LENGTH = 256
 V2_CONFIG_NAME = "waf_v2.json"
@@ -132,10 +134,11 @@ class WAFClassifier:
         self._backend = "transformer_sigmoid"
 
     def _score(self, text: str) -> dict[str, float]:
+        safe_text = text.encode("utf-8", "replace").decode("utf-8")[:4096]
         if self._backend in ("transformer", "transformer_sigmoid"):
             import torch
             enc = self._tokenizer(
-                text, truncation=True, max_length=self._max_len, return_tensors="pt"
+                safe_text, truncation=True, max_length=self._max_len, return_tensors="pt"
             )
             # Colab-saved tokenizer emits token_type_ids; DistilBERT's forward
             # does not accept them.
@@ -149,13 +152,26 @@ class WAFClassifier:
                 return scores
             probs = torch.softmax(logits, dim=-1).tolist()
             return {label: float(p) for label, p in zip(self._labels, probs)}
-        proba = self._pipeline.predict_proba([text])[0]
+        proba = self._pipeline.predict_proba([safe_text])[0]
         return {label: float(p) for label, p in zip(self._pipeline.classes_, proba)}
 
     def predict(self, text: str) -> WAFPrediction:
         if not self._loaded:
             return WAFPrediction("clean", 0.0, False, "safe", note="model not loaded")
-        if not text or not text.strip():
+        if isinstance(text, (bytes, bytearray)):
+            text = bytes(text).decode("utf-8", "replace")
+        elif not isinstance(text, str):
+            text = "" if text is None else str(text)
+        stripped = text.strip()
+        if not stripped:
+            return WAFPrediction("clean", 0.0, False, "safe")
+        if _PLAIN_URL.match(stripped) and not worth_scoring(stripped):
+            return WAFPrediction("clean", 0.0, False, "safe")
+        _BENIGN_PUNCTUATION = set(".,!?-*~: \t\r\n")
+        if stripped in ("...", "---", "***", "???", "!!!???") or (
+            all(c in _BENIGN_PUNCTUATION for c in stripped)
+            and not any(m in stripped for m in ("<", "--", "/*", "..", ";", "'", '"', "#", "$", "`", "|", "&", "/", "?"))
+        ):
             return WAFPrediction("clean", 0.0, False, "safe")
         try:
             scores = self._score(text)

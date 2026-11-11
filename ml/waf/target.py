@@ -31,7 +31,10 @@ _ACTIVE = re.compile(
     r"""\b(?:or|and)\s+\d+\s*=\s*\d+|\border\s+by\s+\d+\b|\bhaving\s+\d+\s*=|/\*""",
     re.I,
 )
-_PLAIN_URL = re.compile(r"""^(?!.*\$[({])(?:https?|ftp)://[^\s'"<>`;|{}\\]+$""", re.I)
+_PLAIN_URL = re.compile(
+    r"""^(?!.*(?:\$[({]|\.\.|/etc/|/proc/|/var/log|/windows/|/winnt/|boot\.ini))(?:https?|ftp)://[^\s'"<>`;|{}\\]+$""",
+    re.I,
+)
 _TRAVERSAL = re.compile(
     r"(?:\.\.[/\\]+){2,}"                          # ../../
     r"|(?:\.{2,8}[/\\]{1,4}){2,}"                  # ....//....//  (survives a one-pass '../' strip); bounded = linear time
@@ -85,7 +88,7 @@ def decoded(target: str) -> str:
 
 
 _MAX_COLLECT = 512          # candidates examined before ranking (bounds the work an attacker can force)
-TAIL_CHARS = 1500
+TAIL_CHARS = 500
 
 
 def _value_parts(v: str) -> list[str]:

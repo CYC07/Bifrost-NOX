@@ -40,7 +40,7 @@ logger = logging.getLogger("text_service")
 # WAF web-attack classifier threshold. Kept high (0.8) on purpose: the model
 # still over-flags some benign traffic (see shadow-mode findings), so we only
 # enforce on high-confidence detections until the clean corpus is grown.
-WAF_ATTACK_THRESHOLD = float(os.getenv("WAF_ATTACK_THRESHOLD", "0.8"))
+WAF_ATTACK_THRESHOLD = float(os.getenv("WAF_ATTACK_THRESHOLD", "0.99"))
 
 # --- GLOBAL MODELS ---
 presidio_analyzer = None
@@ -257,6 +257,23 @@ WAF_MAX_FORM_VALUES = int(os.getenv("WAF_MAX_FORM_VALUES", "16"))
 _WAF_MAX_LEAVES = 4096        # JSON leaves examined before ranking
 
 
+def _as_text(x) -> str:
+    """Coerce whatever arrived as `text` to a string: None -> "", bytes -> utf-8, dict/list -> compact JSON, other -> str().
+    A non-string must neither crash the analysis nor skip it (the gateway fails open on a 500)."""
+    if isinstance(x, str):
+        return x
+    if x is None or isinstance(x, bool):
+        return ""
+    if isinstance(x, (bytes, bytearray)):
+        return bytes(x).decode("utf-8", "replace")
+    if isinstance(x, (dict, list)):
+        try:
+            return json.dumps(x, ensure_ascii=False, separators=(",", ":"), default=str)
+        except Exception:
+            return str(x)
+    return str(x)
+
+
 def _waf_inputs(text: str) -> list[str]:
     """What the WAF should look at. JSON bodies are scored value-by-value (the way real
     WAFs inspect parameters): the model was trained on bare payloads/URLs and classifies
@@ -349,6 +366,7 @@ def model_web_attack(text, parts=None):
     if not waf_classifier:
         return AnalysisResult(module="web_attack", score=0.0, findings=["WAF model not loaded"])
     try:
+        text = _as_text(text)
         for part in (parts if parts is not None else _waf_inputs(text)):
             pred = waf_classifier.predict(part)
             if pred.blocked:
@@ -489,19 +507,6 @@ def _signature_result(text: str):
     return AnalysisResult(module="web_signature", score=1.0, findings=findings, blocked=True,
                           risk=RiskLevel.CRITICAL if _SIG_CRITICAL & set(hits) else RiskLevel.HIGH)
 
-
-def _as_text(x) -> str:
-    """Coerce whatever arrived as `text` to a string: None -> "", bytes -> utf-8, dict/list -> compact JSON, other -> str().
-    A non-string must neither crash the analysis nor skip it (the gateway fails open on a 500)."""
-    if isinstance(x, str):
-        return x
-    if x is None:
-        return ""
-    if isinstance(x, (bytes, bytearray)):
-        return bytes(x).decode("utf-8", "replace")
-    if isinstance(x, (dict, list)):
-        return json.dumps(x, ensure_ascii=False, separators=(",", ":"))
-    return str(x)
 
 
 def _analyze_sync(text: str, in_scope: bool = False, direction: str = "outbound") -> dict:

@@ -44,6 +44,7 @@ _STRONG = re.compile(
     |(?:\.\.[/\\]){3,}|(?:%2e%2e|%252e|\.\.%2f|\.\.%5c|%c0%af)
     |/etc/(?:passwd|shadow|group)\b|\bboot\.ini\b|windows[/\\]win\.ini|/proc/self/environ|php://(?:filter|input)|expect://
     # --- command injection
+    |[;|&\n`]\s*(?:/[?*a-z0-9_]{1,16}){2,}\s+(?:/[?*a-z0-9_]{1,16})+
     |[;|&\n]\s*(?:cat|id|whoami|uname|nc|ncat|netcat|curl|wget|bash|sh|ping|rm|powershell|cmd|python\d?|perl|sleep)\b[^\n]{0,80}
         (?:/etc/|/bin/|\|\s*(?:sh|bash|nc)|\bhttp|\s-\w|\d|;|$)
     |\$\(\s*(?:id|whoami|uname|cat|ls|pwd|echo|curl|wget|nc|sleep|ping|hostname|printf|sh|bash|base64|env)\b[^)\n]{0,60}\)
@@ -90,13 +91,18 @@ def _scan_lines(s: str, parts: list[str]) -> None:
             m = _STRONG.search(seg[: 4 * MAX_LINE])
             if not m:
                 continue
-            lo = max(0, m.start() - 300)
-            val = seg[lo: lo + MAX_LINE]
+            lo = max(0, m.start() - 40)
+            hi = min(len(seg), m.end() + 200)
+            val = seg[lo:hi]
             if "=" in val[:60] and len(val) < MAX_LINE and re.match(r"^[\w.\[\]-]{1,40}=", val):
                 val = val.split("=", 1)[1]  # score the value, as for query targets
             val = val.strip()
             if val and val not in parts:
                 parts.append(val)
+            if m.start() > lo:
+                ms = seg[m.start():hi].strip()
+                if ms and ms not in parts and len(parts) < MAX_PARTS:
+                    parts.append(ms)
             if len(parts) >= MAX_PARTS:
                 return
 
@@ -125,8 +131,15 @@ def waf_gate_parts(text: str) -> list[str]:
                 _scan_lines(variant, parts)
                 m = _UNION_ML.search(variant)
                 if m and len(parts) < MAX_PARTS:
-                    lo = max(0, m.start() - 300)
-                    parts.append(variant[lo: lo + MAX_LINE].strip())
+                    lo = max(0, m.start() - 40)
+                    hi = min(len(variant), m.end() + 200)
+                    part = variant[lo:hi].strip()
+                    if part and part not in parts:
+                        parts.append(part)
+                    if m.start() > lo and len(parts) < MAX_PARTS:
+                        m_part = variant[m.start():hi].strip()
+                        if m_part and m_part not in parts:
+                            parts.append(m_part)
                 if parts:
                     return parts
     return parts
