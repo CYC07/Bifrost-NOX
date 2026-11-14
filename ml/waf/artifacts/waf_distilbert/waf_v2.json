@@ -1,0 +1,23 @@
+{
+ "labels": [
+  "clean",
+  "sqli",
+  "xss",
+  "path_traversal",
+  "command_injection",
+  "ssti",
+  "scanner"
+ ],
+ "attack_labels": [
+  "sqli",
+  "xss",
+  "path_traversal",
+  "command_injection",
+  "ssti",
+  "scanner"
+ ],
+ "max_len": 256,
+ "arm": "A_softmax7",
+ "recommended_threshold": 0.0,
+ "gates": false
+}
