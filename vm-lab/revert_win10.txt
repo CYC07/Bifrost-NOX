@@ -1,0 +1,2 @@
+nic1=nat (original)
+Windows 10 Pro memory=6982 originally (set to 4096 for lab runs; revert: VBoxManage modifyvm 'Windows 10 Pro' --memory 6982)

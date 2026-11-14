@@ -2,7 +2,7 @@ import io
 
 from PIL import Image
 
-from ml.image import synth_cases
+from dataset_tools.image import synth_cases
 
 
 # --- Task 1: eval corpus ---------------------------------------------------
