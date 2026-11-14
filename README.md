@@ -409,6 +409,16 @@ ai_firewall/
 
 ---
 
+## Team
+
+Final Year Project, BS Cyber Security, Riphah International University.
+
+- Abdur Rafay Naveed
+- Alian Rafiq
+- Muhammad Shayan Faisal
+
+---
+
 ## License
 
 Released under the MIT License.
