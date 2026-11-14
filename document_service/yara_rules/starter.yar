@@ -34,36 +34,44 @@ rule Office_VBA_Macro_Project
 rule PDF_JavaScript_Launcher
 {
     meta:
-        description = "PDF containing /JavaScript or /OpenAction auto-launch keys"
+        description = "PDF with JavaScript or Launch action wired to an auto-run trigger (/OpenAction, /AA)"
         severity = "high"
     strings:
         $pdf = "%PDF"
-        $js1 = "/JavaScript"
-        $js2 = "/JS"
-        $oa  = "/OpenAction"
-        $aa  = "/AA"
-        $launch = "/Launch"
+        // PDF names end at a delimiter; "/JS" must not match /JSONData etc.
+        $js1 = /\/JavaScript([^A-Za-z0-9_.#-]|$)/
+        $js2 = /\/JS([^A-Za-z0-9_.#-]|$)/
+        $oa  = /\/OpenAction([^A-Za-z0-9_.#-]|$)/
+        $aa  = /\/AA([^A-Za-z0-9_.#-]|$)/
+        $launch = /\/Launch([^A-Za-z0-9_.#-]|$)/
+        // Acrobat form-field helpers (AFNumber_Format, AFDate_FormatEx, ...): benign /AA scripts.
+        $af_helper = /\(AF[A-Z][A-Za-z]*_[A-Za-z]+\\?\(/
+        $acroform = /\/AcroForm([^A-Za-z0-9_.#-]|$)/
+        $launch_s = /\/S\s*\/Launch([^A-Za-z0-9_.#-]|$)/
     condition:
-        $pdf at 0 and (
-            ($js1 and $oa) or
-            ($js2 and $oa) or
-            $launch or
-            ($aa and ($js1 or $js2))
+        $pdf in (0..1024) and (
+            (($js1 or $js2) and $oa) or
+            $launch_s or
+            ($launch and $oa) or
+            ($aa and ($js1 or $js2) and not $af_helper and not $acroform)
         )
 }
 
 rule PDF_Embedded_Executable
 {
     meta:
-        description = "PDF with embedded file stream containing Windows/Linux executable header"
+        description = "PDF with embedded file stream containing a real PE/ELF/Mach-O executable header"
         severity = "critical"
     strings:
         $pdf = "%PDF"
-        $emb = "/EmbeddedFile"
-        $mz  = "MZ"
-        $elf = { 7F 45 4C 46 }
+        $emb = /\/EmbeddedFile([^A-Za-z0-9_.#-]|$)/
+        // MZ alone matches random binary data; require the DOS stub / PE signature.
+        $pe_stub = /MZ[\x00-\xff]{58}[\x40-\xf8]\x00\x00\x00[\x00-\xff]{0,248}PE\x00\x00/
+        $dos_msg = "This program cannot be run in DOS mode"
+        // ELF ident: class, data, version=1, OSABI, ABI version, 7 zero pad bytes
+        $elf = { 7F 45 4C 46 (01|02) (01|02) 01 ?? ?? 00 00 00 00 00 00 00 }
     condition:
-        $pdf at 0 and $emb and ($mz or $elf)
+        $pdf in (0..1024) and $emb and ($pe_stub or $dos_msg or $elf)
 }
 
 rule Office_Equation_Editor_CVE_2017_11882

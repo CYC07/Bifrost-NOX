@@ -11,11 +11,50 @@ from mitm_engine import TransparentProxy
 # Ensure we can import from common
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from common.utils import FileSniffer, setup_logging
+from common.trusted_domains import is_trusted_connection
+from common.multipart import extract_file_parts
+from ml.waf.behaviour import ScannerTracker, scanner_behaviour_policy
+from ml.waf.scanner import scanner_policy, scanner_signature
 from ml.waf.target import is_interesting as target_is_interesting
 
 # Setup Logging
 setup_logging("gateway")
 logger = logging.getLogger("gateway")
+
+def _doc_scan_mode() -> str:
+    """off = legacy (documents go to the text service); advisory (default) / block = documents
+    go to the document service. Advisory vs block is applied by the orchestrator."""
+    return os.environ.get("DOC_SCAN_MODE", "advisory").strip().lower()
+
+
+def _legacy_office_policy() -> str:
+    """block (default) = legacy Word/Excel/PowerPoint binaries (.doc/.xls/.ppt, OLE2) are blocked
+    outright, like executables: there is no OLE analyzer and they are a classic macro carrier.
+    allow = no special handling."""
+    return os.environ.get("LEGACY_OFFICE_POLICY", "block").strip().lower()
+
+
+def _doc_max_bytes() -> int:
+    """Documents larger than this are allowed unanalysed (ZIP also covers APK/JAR/archives)."""
+    try:
+        return int(os.environ.get("DOC_SCAN_MAX_BYTES", str(20 * 1024 * 1024)))
+    except ValueError:
+        return 20 * 1024 * 1024
+
+
+def _has_field_content(body: bytes) -> bool:
+    """True if a multipart body (file parts already removed) still carries field values, i.e.
+    something besides boundary lines and part headers."""
+    for line in body.split(b"\r\n"):
+        s = line.strip()
+        if not s or s.startswith(b"--"):
+            continue
+        low = s.lower()
+        if low.startswith(b"content-disposition:") or low.startswith(b"content-type:"):
+            continue
+        return True
+    return False
+
 
 MASTER_AI_URL = "http://localhost:8000/analyze_traffic"
 MASTER_LOG_URL = "http://localhost:8000/log_event"
@@ -23,6 +62,8 @@ MASTER_LOG_URL = "http://localhost:8000/log_event"
 class IDPInspector:
     def __init__(self):
         self.client = httpx.AsyncClient()
+        # per (client, host) record of what the server said to the client's requests (scanner behaviour)
+        self.scanner_tracker = ScannerTracker()
 
     async def log_connection(self, src_ip, dst_ip, dst_port, is_tls, host):
         """Fire-and-forget connection-level event so the dashboard shows
@@ -65,9 +106,47 @@ class IDPInspector:
             pass
 
     async def inspect_full(self, headers, body, direction, is_https, src_ip="unknown", dst_ip="unknown", dst_port="",
-                           host="", method="", path=""):
+                           host="", method="", path="", server_name="", dest_ip="", status=0):
         """Called when a full HTTP message is captured. host/method/path give the
         analysis context (e.g. to tell LLM API traffic from ordinary web traffic)."""
+        # Trusted-domain policy (config/trusted_domains.json): Windows/Microsoft infrastructure is
+        # normal traffic - no file-type block, no model analysis. The names are client-claimed, so
+        # the Host header AND the SNI (when there is one; plain HTTP has none) must both be trusted
+        # and the real destination IP must be in Microsoft's ranges.
+        names = [host]
+        if server_name and server_name != dest_ip:
+            names.append(server_name)
+        if is_trusted_connection(names, dest_ip):
+            return "allow"
+
+        # Scanner / recon tools announce themselves in request headers (User-Agent, Acunetix-Aspect, ...) which
+        # no analyzer ever sees; a precise name list catches them deterministically (ml/waf/scanner.py).
+        # SCANNER_UA_POLICY: block (default) | advisory (log only) | off.
+        if direction == "outbound" and scanner_policy() != "off":
+            tool = scanner_signature(headers)
+            if tool:
+                if scanner_policy() == "block":
+                    logger.warning(f"BLOCK: scanner tool '{tool}' ({src_ip} -> {dst_ip}:{dst_port} {method} {host}).")
+                    return "block"
+                logger.warning(f"ADVISORY: scanner tool '{tool}' ({src_ip} -> {dst_ip}:{dst_port} {method} {host}).")
+
+        # Scanner BEHAVIOUR (works even when the User-Agent is spoofed): a client whose requests to one host mostly
+        # return 404/403 across many different paths is enumerating it. Responses feed the tracker (inbound), the
+        # next request from a flagged client is refused for a cooldown. SCANNER_BEHAVIOUR_POLICY: block (default) |
+        # advisory (log only) | off. Other clients and other hosts are never affected.
+        if scanner_behaviour_policy() != "off":
+            site = host or server_name or dest_ip
+            if direction == "inbound":
+                self.scanner_tracker.observe_response(dst_ip, site, status)
+            else:
+                why = self.scanner_tracker.blocked(src_ip, site)
+                if why:
+                    if scanner_behaviour_policy() == "block":
+                        logger.warning(f"BLOCK: scanner behaviour ({src_ip} -> {site}): {why}.")
+                        return "block"
+                    logger.warning(f"ADVISORY: scanner behaviour ({src_ip} -> {site}): {why}.")
+                self.scanner_tracker.observe_request(src_ip, site, path)
+
         # Request target (path + query string). Attacks there (SQLi/XSS/traversal in a GET) were
         # never inspected: only bodies were, so they were only ever caught by accident via the
         # server's echoed reply. A cheap local pre-filter keeps ordinary URLs off the AI path.
@@ -84,7 +163,10 @@ class IDPInspector:
         # Determine content type from headers or content
         c_type_header = headers.get("content-type", "")
 
-        detected_type = FileSniffer.get_true_file_type(body)
+        # A multipart envelope merely CONTAINS files (they are sniffed per part), so the lenient
+        # "PDF header within the first KiB" rule must not fire on the envelope itself.
+        lenient_pdf = "multipart/" not in str(c_type_header).lower()
+        detected_type = FileSniffer.get_true_file_type(body, lenient_pdf=lenient_pdf)
         entropy = FileSniffer.calculate_entropy(body)
 
         logger.info(f"Inspecting {direction} {src_ip} -> {dst_ip}:{dst_port} ({len(body)} bytes) | Header: {c_type_header} | Type: {detected_type}")
@@ -94,13 +176,42 @@ class IDPInspector:
             logger.warning(f"BLOCK: Executable detected ({src_ip} -> {dst_ip}).")
             return "block"
 
+        # 1a. SECURITY: legacy Office binary (.doc/.xls/.ppt) - blocked outright (LEGACY_OFFICE_POLICY).
+        if detected_type == "legacy_office" and _legacy_office_policy() == "block":
+            logger.warning(f"BLOCK: Legacy Office binary (OLE2 .doc/.xls/.ppt) ({src_ip} -> {dst_ip}).")
+            return "block"
+
+        # 1b. Uploaded files inside multipart/form-data: the whole body sniffs as text, so each file
+        # part is sniffed and routed on its own (document -> document service, image -> image
+        # service). The routed bytes are then removed from the body so the remaining fields are
+        # analysed without the file content (a PDF's text was being scored by the WAF as an attack).
+        if direction == "outbound" and (_doc_scan_mode() != "off" or _legacy_office_policy() == "block"):
+            verdict, remaining = await self._inspect_upload_parts(headers, body, direction, src_ip, dst_ip,
+                                                                  dst_port, host, method, path)
+            if verdict == "block":
+                return "block"
+            if remaining is not None:
+                if not _has_field_content(remaining):
+                    return "allow"
+                body = remaining
+                detected_type = FileSniffer.get_true_file_type(body, lenient_pdf=lenient_pdf)
+                entropy = FileSniffer.calculate_entropy(body)
+
         # 2. SECURITY: High Entropy Text
         if detected_type == "text" and entropy > 7.5:
             logger.warning(f"BLOCK: High entropy text ({src_ip} -> {dst_ip}).")
             return "block"
 
         # 3. AI Analysis
-        service_type = "image" if detected_type == "image" else "text"
+        if detected_type == "document":
+            mode = _doc_scan_mode()
+            if mode != "off" and len(body) > _doc_max_bytes():
+                logger.info(f"Document {len(body)} bytes over DOC_SCAN_MAX_BYTES; allowed unanalysed")
+                return "allow"
+            # mode "off" keeps the legacy route (text service)
+            service_type = "document" if mode != "off" else "text"
+        else:
+            service_type = "image" if detected_type == "image" else "text"
         if detected_type not in ["image", "text", "document"]:
              # Ignore others
              return "allow"
@@ -113,6 +224,35 @@ class IDPInspector:
             return "block"
 
         return "allow"
+
+    async def _inspect_upload_parts(self, headers, body, direction, src_ip, dst_ip, dst_port, host, method, path):
+        """Analyse file parts of a multipart upload.
+
+        Returns (verdict, remaining): remaining is the body with the routed document/image parts
+        removed (None when nothing was routed). Parse problems fail open ('allow', None)."""
+        remaining = None
+        try:
+            ctype = headers.get("content-type", "")
+            if "multipart/" not in str(ctype).lower():
+                return "allow", None
+            for part in extract_file_parts(ctype, body, max_part_bytes=_doc_max_bytes()):
+                kind = FileSniffer.get_true_file_type(part.data)
+                if kind == "legacy_office" and _legacy_office_policy() == "block":
+                    logger.warning(f"BLOCK: uploaded legacy Office binary {part.filename!r} ({src_ip} -> {dst_ip}).")
+                    return "block", None
+                if kind not in ("document", "image") or _doc_scan_mode() == "off":
+                    continue
+                logger.info(f"Inspecting uploaded {kind} part {part.filename!r} ({len(part.data)} bytes)")
+                v = await self.send_to_ai(kind, part.data, direction, src_ip, dst_ip, dst_port,
+                                          host=host, method=method, path=path)
+                if v.get("status") == "block":
+                    logger.warning(f"BLOCK AI upload part ({src_ip} -> {dst_ip}): {v.get('reason')}")
+                    return "block", None
+                remaining = (body if remaining is None else remaining).replace(part.data, b"", 1)
+        except Exception as exc:
+            logger.warning(f"Upload part inspection failed open: {type(exc).__name__}: {exc}")
+            return "allow", None
+        return "allow", remaining
 
     async def send_to_ai(self, c_type, payload_bytes, direction, src_ip="unknown", dst_ip="unknown", dst_port="",
                           host="", method="", path="", kind=""):

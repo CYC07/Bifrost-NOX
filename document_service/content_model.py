@@ -113,7 +113,7 @@ def _extract_text_docx(data: bytes) -> str:
 
 
 def extract_text(data: bytes) -> str:
-    if data.startswith(b"%PDF"):
+    if b"%PDF" in data[:1024]:
         return _extract_text_pdf(data)
     if data.startswith(b"PK\x03\x04"):
         return _extract_text_docx(data)

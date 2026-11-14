@@ -10,6 +10,7 @@ from http_parser import HTTPParser
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from common.allowlist import is_allowed as is_host_allowed  # noqa: E402
+from common.trusted_domains import is_trusted_connection  # noqa: E402
 
 logger = logging.getLogger("mitm_engine")
 SO_ORIGINAL_DST = 80
@@ -82,8 +83,39 @@ class TransparentProxy:
             pass
         return None
 
+    def _is_self(self, dest_ip, dest_port, client_writer) -> bool:
+        """Does the connection's original destination point back at this proxy?
+        That means the client connected straight to us (explicit-proxy style, or a probe)
+        instead of being REDIRECTed; forwarding would dial ourselves forever."""
+        if dest_port != self.port:
+            return False
+        local = client_writer.get_extra_info("sockname")
+        local_ip = local[0] if local else ""
+        return dest_ip in {"127.0.0.1", "::1", "0.0.0.0", local_ip}
+
     async def handle_client(self, client_reader, client_writer):
         dest_ip, dest_port = self.get_original_dest(client_writer)
+        if dest_ip and self._is_self(dest_ip, dest_port, client_writer):
+            # Transparent mode only. Dialing ourselves made one `curl -x 127.0.0.1:8080`
+            # an unbounded connection storm (100% CPU, dashboard flooded with loopback rows).
+            peer = client_writer.get_extra_info("peername")
+            logger.warning(f"Refusing direct connection from {peer}: this proxy is transparent-only "
+                           f"(needs iptables REDIRECT); not forwarding to itself")
+            body = (b"This is a transparent inspection proxy; it cannot be used as an explicit "
+                    b"proxy. Traffic must reach it through the firewall's iptables REDIRECT.\n")
+            try:
+                client_writer.write(
+                    b"HTTP/1.1 421 Misdirected Request\r\nContent-Type: text/plain\r\n"
+                    b"Content-Length: " + str(len(body)).encode() + b"\r\nConnection: close\r\n\r\n" + body)
+                await client_writer.drain()
+            except Exception:  # noqa: BLE001 — the peer may already be gone
+                pass
+            finally:
+                try:
+                    client_writer.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            return
         if not dest_ip:
             dest_ip = "127.0.0.1" 
             dest_port = 80 
@@ -147,7 +179,7 @@ class TransparentProxy:
                 self.inspector.log_connection(client_ip, dest_ip, dest_port, is_tls, server_name)
             )
 
-        if is_tls and is_host_allowed(server_name):
+        if self._bypass_mitm(server_name, is_tls, dest_ip):
             logger.info(f"ALLOWLIST bypass (no MITM): {server_name}")
             await self.tunnel_through(
                 client_reader, client_writer, dest_ip, dest_port, server_name, client_ip
@@ -158,6 +190,13 @@ class TransparentProxy:
             await self.handle_https(client_reader, client_writer, dest_ip, dest_port, server_name, client_ip)
         else:
             await self.handle_http(client_reader, client_writer, dest_ip, dest_port, server_name, client_ip)
+
+    def _bypass_mitm(self, server_name, is_tls, dest_ip):
+        """TLS to an allowlisted (cert-pinned) host, or to a trusted domain that really resolves
+        into Microsoft's address space, is tunnelled instead of intercepted."""
+        if not is_tls:
+            return False
+        return bool(is_host_allowed(server_name) or is_trusted_connection([server_name], dest_ip))
 
     async def tunnel_through(self, client_reader, client_writer, dest_ip, dest_port, server_name, client_ip):
         """Raw TCP passthrough for allowlisted cert-pinned apps.
@@ -291,8 +330,10 @@ class TransparentProxy:
                 parser.headers, parser.body, direction, is_https,
                 src_ip=src, dst_ip=dst, dst_port=dest_port,
                 host=real_dst,
+                server_name=server_name, dest_ip=dest_ip,
                 method=(getattr(parser, "method", "") or "") if direction == "outbound" else "",
                 path=(getattr(parser, "path", "") or "") if direction == "outbound" else "",
+                status=(getattr(parser, "status", 0) or 0) if direction == "inbound" else 0,
             )
             if verdict == "block":
                 # Always inform the client, whichever direction tripped.

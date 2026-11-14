@@ -66,7 +66,7 @@ def _result(module, blocked):
 def _patch(monkeypatch, *, pi_blocked, sensitive):
     monkeypatch.setattr(svc, "_route", lambda t: "prose")
     monkeypatch.setattr(svc, "model_code_analysis", lambda t, *a, **k: _result("code", False))
-    monkeypatch.setattr(svc, "model_patterns", lambda t: _result("pattern", False))
+    monkeypatch.setattr(svc, "model_patterns", lambda t, *a, **k: _result("pattern", False))
     monkeypatch.setattr(svc, "model_prompt_injection", lambda t: _result("prompt_injection", pi_blocked))
     monkeypatch.setattr(svc, "model_sensitive", sensitive)
 

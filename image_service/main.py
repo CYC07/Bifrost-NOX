@@ -22,7 +22,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from common.schemas import VerdictStatus, AggregatedVerdict, RiskLevel, AnalysisResult
 from common.utils import setup_logging
 from presidio_analyzer import AnalyzerEngine
-from ml.image import ocr_scan, file_safety, stego, preprocess
+from ml.image import ocr_scan, ocr_read, file_safety, stego, preprocess
 from ml.image.clip_classifier import ClipClassifier
 
 setup_logging("image_service")
@@ -97,10 +97,10 @@ def model_ocr(image: Image.Image):
             for i, frame in enumerate(ImageSequence.Iterator(image)):
                 if i >= OCR_MAX_FRAMES:
                     break
-                texts.append(pytesseract.image_to_string(preprocess.for_ocr(frame)))
+                texts.append(ocr_read.read_text(frame))
             text = "\n".join(texts)
         else:
-            text = pytesseract.image_to_string(preprocess.for_ocr(image))
+            text = ocr_read.read_text(image)
         return ocr_scan.scan_ocr_text(text, presidio_analyzer)
     except Exception as e:
         logger.error(f"OCR Error: {e}")

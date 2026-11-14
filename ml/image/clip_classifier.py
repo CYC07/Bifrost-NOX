@@ -28,6 +28,22 @@ logger = logging.getLogger("image_service")
 MULTICROP = os.getenv("IMAGE_CLIP_MULTICROP", "").lower() in ("1", "true", "yes")
 
 
+def text_features(model, inputs):
+    """Projected text embeddings, shape (n, projection_dim).
+
+    transformers>=5 returns a BaseModelOutputWithPooling from get_text_features instead of a
+    tensor. Projecting the pooled output explicitly is what the old method did and is stable
+    across versions (tests/test_clip_compat.py checks it against CLIP's own logits)."""
+    pooled = model.text_model(**inputs).pooler_output
+    return model.text_projection(pooled)
+
+
+def image_features(model, inputs):
+    """Projected image embeddings, shape (n, projection_dim). See text_features."""
+    pooled = model.vision_model(**inputs).pooler_output
+    return model.visual_projection(pooled)
+
+
 class ClipClassifier:
     def __init__(self, model, processor):
         self.model = model
@@ -41,7 +57,7 @@ class ClipClassifier:
             inputs = self.processor(
                 text=self.labels, return_tensors="pt", padding=True
             )
-            feats = self.model.get_text_features(**inputs)
+            feats = text_features(self.model, inputs)
             feats = feats / feats.norm(p=2, dim=-1, keepdim=True)
         return feats
 
@@ -51,7 +67,7 @@ class ClipClassifier:
         re-encoding the labels."""
         with torch.inference_mode():
             inputs = self.processor(images=image, return_tensors="pt")
-            img_feats = self.model.get_image_features(**inputs)
+            img_feats = image_features(self.model, inputs)
             img_feats = img_feats / img_feats.norm(p=2, dim=-1, keepdim=True)
             logit_scale = self.model.logit_scale.exp()
             logits = logit_scale * img_feats @ self.text_embeds.t()

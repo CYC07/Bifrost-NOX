@@ -41,7 +41,7 @@ def _patch_slow(monkeypatch, calls, delay=0.3):
         return _result("prompt_injection")
     monkeypatch.setattr(svc, "_route", lambda t: "code")
     monkeypatch.setattr(svc, "model_code_analysis", lambda t, *a, **k: _result("code"))
-    monkeypatch.setattr(svc, "model_patterns", lambda t: _result("pattern"))
+    monkeypatch.setattr(svc, "model_patterns", lambda t, *a, **k: _result("pattern"))
     monkeypatch.setattr(svc, "model_prompt_injection", slow_pi)
     svc._cache_clear()
     svc._reset_semaphore()
