@@ -8,6 +8,7 @@ import os
 import asyncio
 import hashlib
 import json
+import re
 import logging
 import threading
 import dataclasses
@@ -18,15 +19,20 @@ from presidio_analyzer import AnalyzerEngine
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from common.schemas import VerdictStatus, AggregatedVerdict, RiskLevel, AnalysisResult
 from common.utils import setup_logging
+from common.iban import inside_iban_shape, presidio_safe
 from ml.waf.predictor import WAFClassifier
 from ml.sensitive.predictor import SensitiveClassifier
+from ml.sensitive.evidence import find_evidence
+from ml.sensitive.chat import message_text
 from ml.secrets.detector import detect as detect_secrets
 from ml.router.predictor import RouterClassifier
 from ml.prompt_injection.predictor import PromptInjectionClassifier
 from ml.prompt_injection import signatures as pi_signatures
-from ml.prompt_injection.prompts import extract_prompts
+from ml.prompt_injection.prompts import extract_prompts, extract_segments
 from common import llm_scope
 from ml.waf import target as request_target
+from ml.waf.gate import has_strong_marker, waf_gate_parts
+from ml.waf.signatures import signature_hits, signature_policy
 
 setup_logging("text_service")
 logger = logging.getLogger("text_service")
@@ -34,7 +40,7 @@ logger = logging.getLogger("text_service")
 # WAF web-attack classifier threshold. Kept high (0.8) on purpose: the model
 # still over-flags some benign traffic (see shadow-mode findings), so we only
 # enforce on high-confidence detections until the clean corpus is grown.
-WAF_ATTACK_THRESHOLD = float(os.getenv("WAF_ATTACK_THRESHOLD", "0.8"))
+WAF_ATTACK_THRESHOLD = float(os.getenv("WAF_ATTACK_THRESHOLD", "0.99"))
 
 # --- GLOBAL MODELS ---
 presidio_analyzer = None
@@ -116,10 +122,11 @@ def model_sensitive(text):
     try:
         pred = sensitive_classifier.predict(text)
         if pred.blocked:
+            how = pred.reason + (f": {', '.join(pred.evidence)}" if pred.reason != "nli" and pred.evidence else "")
             return AnalysisResult(
                 module="sensitive",
                 score=pred.score,
-                findings=[f"Sensitive content: {pred.label} (risk={pred.risk}, conf={pred.score:.2f})"],
+                findings=[f"Sensitive content: {pred.label} (risk={pred.risk}, conf={pred.score:.2f}, via={how})"],
                 blocked=True,
                 risk=RiskLevel(pred.risk),
             )
@@ -127,6 +134,18 @@ def model_sensitive(text):
     except Exception as e:
         logger.error(f"Sensitive Error: {e}")
         return AnalysisResult(module="sensitive", score=0.0, findings=[])
+
+def _sensitive_for_direction(text, direction):
+    """Sensitive-content verdict, direction-aware. Outbound it can block (data leaving the network).
+    Inbound it is advisory: a server's own reply (its terms of service, a record it sends back to the
+    person it belongs to) is not exfiltration, and blocking it is a pure false positive. The finding
+    still reaches the dashboard as a WARN (CENSOR). SENSITIVE_INBOUND=block restores blocking."""
+    res = model_sensitive(text)
+    if res.blocked and direction != "outbound" and os.getenv("SENSITIVE_INBOUND", "advisory").strip().lower() != "block":
+        return AnalysisResult(module=res.module, score=res.score, findings=res.findings,
+                              blocked=False, risk=RiskLevel.LOW, raw_data={"advisory": True})
+    return res
+
 
 # Credentials that legitimately travel in requests/responses and URLs: JWTs (SSO callbacks, magic
 # links, every login API reply), client-side Google API keys, a generic password=. Reported as
@@ -161,52 +180,123 @@ def model_code_analysis(text, direction="outbound"):
     return AnalysisResult(module="code", score=0.5, findings=findings, risk=RiskLevel.LOW,
                           raw_data={"advisory": True})
 
-def model_patterns(text):
-    """Presidio PII detection. Financial/government identifiers (credit card,
-    SSN, IBAN) block outright — those are never benign in transit. Contact
-    info (phone/email) alone is informational only, not blocking — it's
-    routine in normal traffic (contact forms, headers) and blocking on it
-    would be a firewall that can't pass an email address."""
+PII_MIN_SCORE = float(os.getenv("PII_MIN_SCORE", "0.4"))
+# Presidio names the IBAN entity IBAN_CODE and silently ignores unknown names in `entities`:
+# asking for "IBAN" meant IBANs were never looked for at all.
+_PII_SENSITIVE = {"CREDIT_CARD", "US_SSN", "IBAN_CODE"}
+_PII_ENTITIES = ["PHONE_NUMBER", "EMAIL_ADDRESS", "IBAN_CODE", "CREDIT_CARD", "US_SSN"]
+# A Luhn-valid number scores 1.0 whatever it is (device ids, session ids...), so a card needs
+# card formatting (groups separated by space/dash) or card-ish words just before it.
+_CARD_CONTEXT = re.compile(r"card|credit|debit|visa|master|amex|\bcc\b|cc_|ccnum|cvv|cvc|expir|payment|\bpan\b", re.I)
+_CARD_GROUPED = re.compile(r"\d{4}[ -]\d{4}[ -]\d{4}[ -]\d{1,7}$")
+# Presidio only reports an IBAN whose country format and mod-97 checksum are valid, and then
+# scores it 1.0; like a card it additionally needs IBAN print formatting (4-char groups) or
+# banking words just before it. A bare compact one (could be an order/reference id) is advisory.
+_IBAN_CONTEXT = re.compile(r"iban|\bbank|account|\bacct|transfer|\bwire|sepa|beneficiar|payee|\bpay|remit|"
+                           r"swift|\bbic\b|konto|\brib\b", re.I)
+_IBAN_GROUPED = re.compile(r"[A-Z]{2}\d{2}(?:[ -][A-Z0-9]{4}){2,7}(?:[ -][A-Z0-9]{1,3})?$")
+
+
+def _looks_like_card(text: str, start: int, end: int) -> bool:
+    # digit groups inside an IBAN-shaped run (valid or not) are not card formatting
+    grouped = _CARD_GROUPED.search(text[start:end].strip()) and not inside_iban_shape(text, start, end)
+    return bool(grouped or _CARD_CONTEXT.search(text[max(0, start - 60):start]))
+
+
+def _looks_like_iban(text: str, start: int, end: int) -> bool:
+    return bool(_IBAN_GROUPED.match(text[start:end].strip()) or _IBAN_CONTEXT.search(text[max(0, start - 60):start]))
+
+
+_PII_EVIDENCE = {"CREDIT_CARD": _looks_like_card, "IBAN_CODE": _looks_like_iban}
+
+
+def model_patterns(text, direction="outbound"):
+    """Presidio PII detection, blocking on evidence rather than entity type.
+
+    Found live: a Windows push-service reply and an app login body were blocked as US_SSN
+    although Presidio itself scored them 0.05 (any bare 9-digit id). So: a sensitive entity
+    blocks only at score >= PII_MIN_SCORE (bare 9 digits 0.05; formatted SSN 0.5; with
+    context 0.85); a credit card additionally needs card formatting or card-ish context, and an
+    IBAN (checksum-validated by Presidio) needs 4-char group formatting or banking context.
+    Anything weaker that still matched is reported as advisory. Inbound replies are advisory
+    only (a server's own reply is not exfiltration). Contact info (phone/email) is
+    informational: routine in normal traffic."""
     if not presidio_analyzer:
         return AnalysisResult(module="pattern", score=0.0, findings=["Presidio not loaded"])
     try:
-        results = presidio_analyzer.analyze(text=text, entities=["PHONE_NUMBER", "EMAIL_ADDRESS", "IBAN", "CREDIT_CARD", "US_SSN"], language='en')
-        findings = []
-        blocked = False
+        results = presidio_analyzer.analyze(text=presidio_safe(text), entities=_PII_ENTITIES, language='en')
+        findings: list[str] = []
+        hard = soft = False
         for res in results:
+            if res.entity_type not in _PII_SENSITIVE:
+                findings.append(f"PII Detected: {res.entity_type} ({res.score:.2f})")      # contact info
+                continue
+            if res.score < PII_MIN_SCORE:
+                continue                                  # Presidio itself says "unlikely"
             findings.append(f"PII Detected: {res.entity_type} ({res.score:.2f})")
-            if res.entity_type in ["CREDIT_CARD", "US_SSN", "IBAN"]:
-                blocked = True
-        score = 0.9 if blocked else (0.4 if findings else 0.0)
-        risk = RiskLevel.CRITICAL if blocked else RiskLevel.SAFE
-        return AnalysisResult(module="pattern", score=score, findings=findings, blocked=blocked, risk=risk)
+            evidence = _PII_EVIDENCE.get(res.entity_type)
+            if direction == "outbound" and (evidence is None or evidence(text, res.start, res.end)):
+                hard = True
+            else:
+                soft = True
+        if hard:
+            return AnalysisResult(module="pattern", score=0.9, findings=findings, blocked=True, risk=RiskLevel.CRITICAL)
+        if soft:
+            return AnalysisResult(module="pattern", score=0.4, findings=findings, risk=RiskLevel.LOW,
+                                  raw_data={"advisory": True})
+        return AnalysisResult(module="pattern", score=0.4 if findings else 0.0, findings=findings)
     except Exception as e:
         logger.error(f"Presidio Error: {e}")
         return AnalysisResult(module="pattern", score=0.0, findings=[])
 
 WAF_MAX_VALUES = int(os.getenv("WAF_MAX_VALUES", "64"))
 WAF_MAX_VALUE_CHARS = int(os.getenv("WAF_MAX_VALUE_CHARS", "2000"))
+# decoded form values shown to the model per body (each costs one WAF inference; the raw text is
+# always scored too, so padding a body with fields cannot hide a payload from the raw pass)
+WAF_MAX_FORM_VALUES = int(os.getenv("WAF_MAX_FORM_VALUES", "16"))
+_WAF_MAX_LEAVES = 4096        # JSON leaves examined before ranking
+
+
+def _as_text(x) -> str:
+    """Coerce whatever arrived as `text` to a string: None -> "", bytes -> utf-8, dict/list -> compact JSON, other -> str().
+    A non-string must neither crash the analysis nor skip it (the gateway fails open on a 500)."""
+    if isinstance(x, str):
+        return x
+    if x is None or isinstance(x, bool):
+        return ""
+    if isinstance(x, (bytes, bytearray)):
+        return bytes(x).decode("utf-8", "replace")
+    if isinstance(x, (dict, list)):
+        try:
+            return json.dumps(x, ensure_ascii=False, separators=(",", ":"), default=str)
+        except Exception:
+            return str(x)
+    return str(x)
 
 
 def _waf_inputs(text: str) -> list[str]:
     """What the WAF should look at. JSON bodies are scored value-by-value (the way real
     WAFs inspect parameters): the model was trained on bare payloads/URLs and classifies
     the *shape* of a JSON blob (braces, quotes, "username"/"password") as SQL injection,
-    while the individual values are judged on their content. Anything else is scored whole."""
+    while the individual values are judged on their content. Anything else is scored whole.
+    A string value with %XX escapes is followed by its decoded form when that is attack-shaped
+    (same rule as form values), so `{"q": "1%27%20UNION..."}` is not invisible to the model."""
     s = text.lstrip()
     if not s.startswith(("{", "[")):
-        return [text[:WAF_MAX_VALUE_CHARS]]
+        return _form_inputs(text)
     try:
         obj = json.loads(text)
     except Exception:  # noqa: BLE001 — malformed JSON: fall back to the whole text
         return [text[:WAF_MAX_VALUE_CHARS]]
-    out: list[str] = []
+    leaves: list[tuple[str, bool]] = []          # (text, was a JSON string); bounded so a huge body cannot force unbounded work
 
     def walk(o):
-        if len(out) >= WAF_MAX_VALUES:
+        if len(leaves) >= _WAF_MAX_LEAVES:
             return
         if isinstance(o, dict):
-            for v in o.values():
+            for k, v in o.items():
+                if isinstance(k, str) and has_strong_marker(k):      # keys are input too (precision first: marker only)
+                    leaves.append((k.strip(), True))
                 walk(v)
         elif isinstance(o, list):
             for v in o:
@@ -214,8 +304,57 @@ def _waf_inputs(text: str) -> list[str]:
         elif o is not None and not isinstance(o, bool):
             v = str(o).strip()
             if v:
-                out.append(v[:WAF_MAX_VALUE_CHARS])
+                leaves.append((v, isinstance(o, str)))
     walk(obj)
+    # Rank before capping: leaves carrying a strong injection marker first, then attack-shaped ones, then
+    # the rest (stable, so ordinary bodies keep their order). Padding a body with 64 harmless values can no
+    # longer push the payload past WAF_MAX_VALUES.
+    rank = lambda t: 0 if has_strong_marker(t[0]) else (1 if request_target.worth_scoring(t[0]) else 2)  # noqa: E731
+    out: list[str] = []
+    n_dec = 0
+    for v, is_str in sorted(leaves, key=rank)[:WAF_MAX_VALUES]:
+        out.extend(request_target._value_parts(v))
+        if is_str and n_dec < WAF_MAX_FORM_VALUES:
+            dec = _decoded_value(v)
+            if dec and dec not in out:
+                out.append(dec)
+                n_dec += 1
+    return out
+
+
+def _decoded_value(v: str) -> str | None:
+    """The percent-decoded form of a JSON string value, or None when decoding changes nothing or
+    the result is not attack-shaped (plain words, encoded URLs, emails and spaces stay away from
+    the model). JSON is not form-encoded, so '+' is kept as a literal plus."""
+    if not request_target.has_escapes(v):
+        return None
+    dec = request_target.decode_text(v).strip()[:WAF_MAX_VALUE_CHARS]
+    if dec == v or request_target.is_plain_url(dec) or not request_target.worth_scoring(dec):
+        return None
+    return dec
+
+
+def _form_inputs(text: str) -> list[str]:
+    """Raw text first (unchanged behaviour), then what a server would actually see. A key=value&...
+    body (or `/path?k=v`) contributes its percent-decoded values; any other text with %XX escapes
+    contributes its decoded form. Only attack-shaped decoded values reach the model
+    (ml/waf/target.py worth_scoring), which keeps ordinary form fields away from it. The model
+    was trained on decoded payloads, so `q=%27+OR+%271%27%3D%271` is invisible to it as-is."""
+    raw = text[:WAF_MAX_VALUE_CHARS]
+    out = [raw]
+    if request_target.is_form(text):
+        values = request_target.body_values(text)
+    else:  # not key=value shaped: a bare encoded payload is judged as a whole
+        values = []
+        if request_target.has_escapes(text):
+            dec = request_target.decode_text(text)[:WAF_MAX_VALUE_CHARS]
+            if dec != raw and request_target.worth_scoring(dec):
+                values.append(dec)
+    for v in values:
+        if v not in out:
+            out.append(v)
+        if len(out) >= WAF_MAX_FORM_VALUES + 1:
+            break
     return out
 
 
@@ -227,6 +366,7 @@ def model_web_attack(text, parts=None):
     if not waf_classifier:
         return AnalysisResult(module="web_attack", score=0.0, findings=["WAF model not loaded"])
     try:
+        text = _as_text(text)
         for part in (parts if parts is not None else _waf_inputs(text)):
             pred = waf_classifier.predict(part)
             if pred.blocked:
@@ -245,13 +385,19 @@ def model_web_attack(text, parts=None):
 def model_prompt_injection(text):
     """Prompt-injection detection (protectai deberta) — flags text attempting
     to manipulate an LLM's instructions (ignore-previous-instructions,
-    role-override jailbreaks, fake embedded system directives)."""
+    role-override jailbreaks, fake embedded system directives).
+
+    The classifier's request gate (ml/prompt_injection/gating.py) decides block / advisory /
+    allow: a strong score, or a lower score plus a structural cue, blocks; weaker evidence
+    and anything found only in developer-authored `system` text is reported as advisory
+    (CENSOR -> dashboard WARN) and the request goes through."""
     if not prompt_injection_classifier:
         return AnalysisResult(module="prompt_injection", score=0.0, findings=["Prompt-injection model not loaded"])
     try:
-        # Score the language an LLM would read (message contents), windowed so padding
-        # can't push an injection past the model's input limit — not the JSON wrapper.
-        pred = prompt_injection_classifier.predict_texts(extract_prompts(text))
+        # Score the language an LLM would read (message contents, with their roles), windowed so
+        # padding can't push an injection past the model's input limit — not the JSON wrapper.
+        segs = extract_segments(text)
+        pred = prompt_injection_classifier.predict_texts([s.text for s in segs], roles=[s.role for s in segs])
         if pred.blocked:
             return AnalysisResult(
                 module="prompt_injection",
@@ -259,6 +405,14 @@ def model_prompt_injection(text):
                 findings=[f"Prompt injection detected (conf={pred.score:.2f})"],
                 blocked=True,
                 risk=RiskLevel(pred.risk),
+            )
+        if getattr(pred, "advisory", False):
+            return AnalysisResult(
+                module="prompt_injection",
+                score=pred.score,
+                findings=[f"Possible prompt injection, weak evidence (conf={pred.score:.2f}, {getattr(pred, 'reason', '')})"],
+                risk=RiskLevel.LOW,
+                raw_data={"advisory": True, "reason": getattr(pred, "reason", ""), "cues": list(getattr(pred, "cues", ()))},
             )
         return AnalysisResult(module="prompt_injection", score=0.0, findings=[])
     except Exception as e:
@@ -335,7 +489,28 @@ def _analyze_cached(text: str, in_scope: bool = False, direction: str = "outboun
     return result
 
 
+_SIG_CRITICAL = {"jndi", "deserialization", "shellshock"}
+
+
+def _signature_result(text: str):
+    """Attack classes outside the WAF model's taxonomy (ml/waf/signatures.py): SSRF, XXE, CRLF, NoSQLi, JNDI,
+    deserialization, Shellshock, prototype pollution, LDAP, SSI. None when nothing matched or the policy is off."""
+    policy = signature_policy()
+    if policy == "off":
+        return None
+    hits = signature_hits(text)
+    if not hits:
+        return None
+    findings = [f"Attack signature: {', '.join(hits)}"]
+    if policy == "advisory":
+        return AnalysisResult(module="web_signature", score=0.5, findings=findings, risk=RiskLevel.LOW, raw_data={"advisory": True})
+    return AnalysisResult(module="web_signature", score=1.0, findings=findings, blocked=True,
+                          risk=RiskLevel.CRITICAL if _SIG_CRITICAL & set(hits) else RiskLevel.HIGH)
+
+
+
 def _analyze_sync(text: str, in_scope: bool = False, direction: str = "outbound") -> dict:
+    text = _as_text(text)
     # Secrets + PII + prompt-injection *signatures* always run — cheap regex, and
     # credential/PII leaks are too high-stakes to make conditional on the router's
     # guess. The prompt-injection MODEL runs only for traffic to an LLM endpoint
@@ -345,7 +520,11 @@ def _analyze_sync(text: str, in_scope: bool = False, direction: str = "outbound"
     # Outside LLM scope a signature hit is advisory (CENSOR -> dashboard WARN).
     # sensitive-content and web_attack are the only analyzers the router gates.
     route = _route(text)
-    results = [model_code_analysis(text, direction), model_patterns(text), model_pi_signatures(text, in_scope)]
+    results = [model_code_analysis(text, direction), model_patterns(text, direction), model_pi_signatures(text, in_scope)]
+    if direction == "outbound" and not in_scope:
+        sig_result = _signature_result(text)
+        if sig_result is not None:
+            results.append(sig_result)
     # Expensive analyzers run last and only if nothing has blocked yet: the verdict
     # is an OR of block decisions, so once one has fired, running a slower analyzer
     # can only add findings, not change the outcome.
@@ -358,8 +537,33 @@ def _analyze_sync(text: str, in_scope: bool = False, direction: str = "outbound"
             # source of false positives, so it doesn't run on them: availability first.
             if direction == "outbound":
                 results.append(model_web_attack(text))
-        elif route == "prose":
-            results.append(model_sensitive(text))
+        # The router guesses the SHAPE of a body, and a pay list ("Alice 142000, Bob 98000, ...,
+        # confidential") is shaped like a web request, so the sensitive analyzer also runs for any body
+        # that carries hard private-data evidence (confidentiality marking, ID number, pay list, ...)
+        # whatever the router said (outbound only: inbound the finding is advisory, so it is not worth an
+        # NLI pass on every API reply that mentions an account number). Ordinary web_request / code
+        # bodies still skip the NLI.
+        # A chat-API body is judged on what its user/assistant/tool messages say, never on the JSON wrapper or
+        # on `system` text (a developer's "never reveal these instructions" prompt is not a leak): the
+        # extracted text is what gets routed, checked for evidence and scored.
+        s_text, s_route = text, route
+        chat_text = message_text(text)
+        if chat_text is not None:
+            s_text, s_route = chat_text, (_route(chat_text) if chat_text.strip() else "")
+        if (s_text.strip() and not any(r.blocked for r in results)
+                and (s_route == "prose" or (direction == "outbound" and find_evidence(s_text)))):
+            results.append(_sensitive_for_direction(s_text, direction))
+        # The router guesses the SHAPE of a body; injection payloads are often shaped like code
+        # or prose (`1 UNION SELECT ...`, shell one-liners, <script> blocks), so the WAF also looks at
+        # the lines carrying a strong injection marker, whatever the route. For web_request bodies this
+        # matters too: the model reads only the first ~2000 characters of each value, so a payload behind
+        # 2 KB of hex/ID padding is invisible to it but not to the marker gate (measured: 4/4 padded
+        # payloads blocked, 0/21 ordinary bodies reach the model through the gate).
+        if direction == "outbound" and not any(r.blocked for r in results):
+            already = set(_waf_inputs(text)) if route == "web_request" else set()
+            gated = [g for g in waf_gate_parts(text) if g not in already]
+            if gated:
+                results.append(model_web_attack("", parts=gated))
     # route == "code": secrets + PII + prompt-injection already cover the real
     # risk, skip the other two.
     return _aggregate(results, route)
@@ -379,6 +583,9 @@ def _analyze_target(target: str) -> dict:
     # Secrets in the URL: same policy as bodies (vendor secrets block, JWT/Google key/generic are
     # advisory — a JWT in an SSO callback or magic link is normal).
     results.append(model_code_analysis(request_target.decoded(target), "outbound"))
+    sig_result = _signature_result(target)
+    if sig_result is not None:
+        results.append(sig_result)
     values = request_target.waf_values(target)
     if values and not any(r.blocked for r in results):
         results.append(model_web_attack("", parts=values))
@@ -430,7 +637,7 @@ async def analyze_text(request: Request):
     except:
         return JSONResponse({"detail": "Invalid JSON"}, status_code=400)
 
-    text = body.get("text", "")
+    text = _as_text(body.get("text", ""))
     md = body.get("metadata") or {}
     direction = md.get("direction") or "outbound"
     kind = md.get("kind") or ""

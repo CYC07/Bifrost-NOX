@@ -76,6 +76,8 @@ THREAT_PATTERNS: list[tuple[str, str, str, float]] = [
     ("prompt injection", "Prompt Injection", "critical", 0.97),
     ("request_target", "Malicious Request Target", "high", 0.92),
     ("web_attack", "Web Attack", "high", 0.90),
+    ("code", "Secret Leak", "high", 0.95),        # analyzer module names, as in "Blocked by: code"
+    ("pattern", "PII Exposure", "high", 0.90),
     ("injection", "Command Injection", "critical", 0.98),
     ("malware", "Malware Payload", "critical", 0.96),
     ("eicar", "EICAR Test Signature", "medium", 0.99),
@@ -280,6 +282,16 @@ async def analyze_traffic(request: Request) -> JSONResponse:
                 resp = await client.post(f"{DOCUMENT_SERVICE_URL}/analyze", files=files)
                 if resp.status_code == 200:
                     verdict = AggregatedVerdict(**resp.json())
+                    # The document analyzers have a measured, non-zero false-positive rate on real
+                    # benign PDFs, so by default a block is advisory (warn row, nothing blocked);
+                    # DOC_SCAN_MODE=block enforces it.
+                    if (os.environ.get("DOC_SCAN_MODE", "advisory").strip().lower() != "block"
+                            and verdict.status == VerdictStatus.BLOCK):
+                        verdict = AggregatedVerdict(
+                            status=VerdictStatus.CENSOR, risk_level="medium",
+                            reason=f"Advisory (DOC_SCAN_MODE=advisory): {verdict.reason}",
+                            detailed_findings=verdict.detailed_findings,
+                        )
                 else:
                     verdict = _no_verdict(f"document service HTTP {resp.status_code}", verdict)
 

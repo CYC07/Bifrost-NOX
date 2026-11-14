@@ -1,6 +1,6 @@
 # Bifrost NØX — AI-Driven Network Firewall
 
-![Python](https://img.shields.io/badge/Python-3.11-3776AB?style=for-the-badge&logo=python&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge&logo=opensourceinitiative&logoColor=white)
 ![Platform](https://img.shields.io/badge/Platform-Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black)
 ![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)
@@ -8,49 +8,88 @@
 ![C++](https://img.shields.io/badge/C++-17-00599C?style=for-the-badge&logo=cplusplus&logoColor=white)
 ![Status](https://img.shields.io/badge/Status-In_Development-orange?style=for-the-badge)
 
-An AI-powered transparent proxy firewall that intercepts, inspects, and classifies network traffic in real time using a multi-layered pipeline of specialised machine learning microservices. Built as a Final Year Project.
+An AI-powered transparent proxy firewall that intercepts, inspects, and classifies network traffic in real time using a pipeline of specialised machine-learning microservices. Built as a Final Year Project.
+
+![Dashboard overview](docs/screenshots/dashboard-overview.png)
 
 ---
 
 ## Overview
 
-Bifrost NØX sits between a Wi-Fi hotspot and the internet, intercepting HTTP and HTTPS traffic via a MITM proxy and iptables packet capture. Each request is analysed by one or more AI microservices — image classification, document scanning, and NLP — before a ALLOW / BLOCK / CENSOR verdict is returned in milliseconds.
+Bifrost NØX sits between a client network (a Wi-Fi hotspot, or a VM host-only network) and the internet, intercepting HTTP and HTTPS traffic via a MITM proxy and iptables packet capture. Each request and response is analysed by one or more services — image classification, document scanning, and text/web-attack analysis — and an `ALLOW` / `BLOCK` / `CENSOR` (advisory) verdict is returned in well under a second.
 
 ```
-Device (phone/laptop)
+Device (phone / laptop / VM)
         │
         ▼
-  Wi-Fi Hotspot (wlan1)
+  Hotspot (wlan1) or host-only net (vboxnet0)
         │  iptables REDIRECT / NFQUEUE
         ▼
-  C++ Firewall Engine  ◄──ZeroMQ IPC──►  AI Brain (Python)
-        │                                        │
-        ▼                                        ▼
-  MITM Gateway (:8080)              Master AI Orchestrator (:8000)
-  TLS interception                  ┌──────────────────────────┐
-  SNI extraction                    │  Image Service  (:8001)  │
-  Allowlist bypass                  │  Document Service(:8002) │
-                                    │  Text Service   (:8003)  │
-                                    └──────────────────────────┘
-                                                  │
-                                                  ▼
-                                    Dashboard (localhost:8000)
+  C++ Firewall Engine  ◄──ZeroMQ IPC──►  AI Brain (Python)        DNS filtering
+        │
+        ▼
+  MITM Gateway (:8080)   TLS interception · SNI · allowlist bypass · request-target pre-filter
+        │  body / request target / direction / host / path
+        ▼
+  Master AI Orchestrator (:8000) ── rules · stats · dashboard
+        │
+        ├── Text Service     (:8003)  secrets · PII · WAF · prompt-injection · sensitive content
+        ├── Image Service    (:8001)  CLIP · YOLOv8 · OCR · stego · file safety
+        └── Document Service (:8002)  YARA · VirusTotal · metadata · structural anomaly
 ```
+
+---
+
+## Design principle: availability over security
+
+This is a gateway people have to be able to use. Every default favours not breaking legitimate traffic, and coverage is meant to grow over time.
+
+- **Default-allow.** Traffic is blocked only on positive evidence of an attack. A request nobody recognises is allowed.
+- **Fail-open.** If analysis is slow or an analyzer breaks, the request is allowed and the failure is logged loudly. `AI_FAIL_MODE=closed` flips this.
+- **Advisory before blocking.** Lower-confidence findings are reported as `WARN` rows on the dashboard and never block.
+- **Scoped analyzers.** A detector only runs where its question makes sense (see below), because several models were measured to false-positive at saturated confidence on ordinary web traffic, where no threshold can fix it.
+- **Accepted gaps.** Obfuscated payloads with no active characters, SSRF/open-redirect values that are plain URLs, and paraphrased prompt injection outside LLM traffic are not blocked.
+
+### What runs where
+
+| Traffic | Analysis | Blocks when |
+|---|---|---|
+| **Request target** (path + query string, sent only when it looks interesting) | traversal / sensitive-file regex, secrets scan, WAF model on values with an *active* character (quotes, `<>;\|&$(){}`, `..`, SQL phrases; plain URLs and tokens are skipped) | signature hit, vendor secret, or WAF attack label ≥ threshold |
+| **Outbound body** | secrets, PII patterns, prompt-injection signatures, then router → WAF (JSON scored value-by-value) or zero-shot sensitive-content | vendor secret, PII, WAF/sensitive hit |
+| **Outbound body to an LLM endpoint** | all of the above + extracted message text scored by the prompt-injection model in overlapping windows; signature hits **block** | injection model ≥ threshold or signature |
+| **Inbound reply** | secrets, PII and signatures (all advisory); zero-shot sensitive-content; the WAF and the injection model do **not** run | sensitive-content hit only |
+| **Images** | CLIP multi-label, YOLOv8, OCR → secrets + PII, stego, file-safety guards | policy per group |
+| **Documents** | YARA, VirusTotal hash lookup, metadata forensics, structural anomaly (Isolation Forest) | any engine blocks |
+
+**Secret policy.** Outbound, vendor secrets that never belong on the wire (AWS keys, private keys, Stripe live keys, GitHub/Slack tokens, DB connection strings) block. Credentials that legitimately travel in requests and responses (JWTs, client-side Google API keys, a generic `password=`) are advisory. Inbound, everything is advisory.
+
+**PII policy.** Presidio findings block on *evidence*, not on entity type. A US SSN blocks only at Presidio confidence ≥ `PII_MIN_SCORE` (0.4): a bare nine-digit id scores 0.05 and is ignored, a formatted SSN scores 0.5, and one with context ("ssn", "social security") 0.85. A Luhn-valid number always scores 1.0, so a credit card additionally needs card formatting (`4111 1111 1111 1111`) or a card-ish word just before it (`card`, `cvv`, `visa`, …); a bare Luhn-valid identifier is advisory. An IBAN (Presidio entity `IBAN_CODE`, reported only when its country format and mod-97 checksum are valid) likewise needs print formatting in 4-character groups (`DE89 3704 …`) or a banking word just before it (`iban`, `account`, `bank`, `transfer`, `wire`, `sepa`, `beneficiary`, `pay…`, …); a bare compact one is advisory, and a broken checksum is never reported. This was found by capturing live blocks: a Windows push-notification reply and an app login body were being blocked as "SSN" at confidence 0.05. Phone/email are informational only.
+
+**Trusted domains.** Traffic to `microsoft.com`, `windows.com` and all their subdomains (`config/trusted_domains.json`, hot-reloaded) is treated as normal: TLS is tunnelled rather than intercepted, and no file-type block or model analysis runs. A firewall cannot see which *process* sent a packet, so "Windows' own processes" is approximated by "Windows' own domains". Matching is by DNS label: `evilmicrosoft.com` and `microsoft.com.evil.test` are not trusted, IP addresses never are, and attacker-registrable hosts such as `*.blob.core.windows.net` are deliberately not on the list. Trade-off: anything hosted under a trusted domain is invisible to the firewall, so keep the list narrow.
+
+The name alone is never enough, because SNI and `Host` are set by the client. A connection is trusted only if **every name it presents is trusted** (SNI and `Host` must agree, which defeats domain fronting) **and the real destination IP is inside Microsoft's published ranges** (`config/microsoft_ip_ranges.json`, which defeats a spoofed SNI aimed at an attacker's server). Refresh the ranges with `python scripts/update_microsoft_ranges.py`. Known limits: the ranges include Azure address space, which anyone can rent, so spoofing now requires running a VM in Azure rather than setting a header; CDN-fronted Microsoft hosts (Akamai, Cloudflare; about 18 % of destinations in the lab) cannot be verified by IP and get normal inspection; a missing ranges file also means normal inspection. `TRUSTED_VERIFY_IP=0` restores name-only trust.
+
+**Documents and uploads.** PDFs and ZIP-based files (DOCX/XLSX/…) are sent to the document service (YARA, structure, metadata), both as downloads and as **file parts of multipart uploads** (each part is sniffed and routed on its own; the routed bytes are removed before the remaining form fields get text analysis). Files over `DOC_SCAN_MAX_BYTES` (20 MB) are allowed unanalysed. Executables keep the blanket block. The existing document analyzers are not perfectly precise (measured: 1 of 78 real benign files blocked, a Ghostscript manual whose `/JS` prefix + `/OpenAction` trips the `PDF_JavaScript_Launcher` rule), so a document-service BLOCK is **advisory by default** (a warn row in the Uploads feed, nothing blocked); set `DOC_SCAN_MODE=block` to enforce it, or `off` to restore the legacy route. In block mode the live battery (`vm-lab/fw_malware.ps1`: PDF with `/OpenAction`+`/JavaScript`, DOCX with `vbaProject.bin`, EICAR inside a stored ZIP, plus clean controls; HTTP and HTTPS; downloads and uploads) blocks 7/7 malicious and passes 7/7 clean.
+
+**LLM scope.** Prompt injection only matters for text that will reach an instruction-following model. Traffic is treated as LLM traffic when it is outbound **and** the host is in `config/llm_hosts.json`, the path ends in a known LLM API path (`/v1/chat/completions`, `/v1/messages`, …), or the JSON body looks like an LLM call (`model` + `messages`/`prompt`/`input`/`contents`). The list hot-reloads; add your company's internal LLM gateway there.
 
 ---
 
 ## Features
 
-- **Transparent HTTPS interception** — MITM proxy with per-domain certificate generation; no client configuration needed when deployed as a hotspot gateway
-- **AI content analysis** — CLIP + YOLOv8 for image NSFW/object detection; YARA + VirusTotal hash lookup + structural anomaly detection (Isolation Forest) + metadata forensics for documents; Presidio + sentence-transformers for PII, API key leaks, and SQL injection in text
-- **Static rule engine** — IP/port/domain/keyword rules evaluated before AI inference; configurable via the dashboard
-- **Allowlist for cert-pinned apps** — WhatsApp, Snapchat, Signal, Telegram, and any other app that pins its TLS certificate can be allowlisted to tunnel through uninspected; all others are blocked by default if MITM fails
-- **Real-time dashboard** — live KPI cards, threat feed, traffic charts, rule management, and AI file intake at `http://localhost:8000`
-- **DNS-layer domain filtering** — the NFQUEUE path (C++ engine → ZMQ → `ai_brain`) parses each DNS query and blocks domains matching `config/dns_blocklist.json` or a `domain` rule in the rule engine; complements the proxy's content filtering
-- **C++ packet engine** — NFQUEUE handler with 10-second flow cache; fail-open by default so network access is never fully blocked
-- **Control-plane authentication** — state-changing endpoints (rules, allowlist, test) and internal ingest (`/analyze_traffic`, `/log_event`) require a loopback client or a valid `FIREWALL_ADMIN_TOKEN`, so hotspot clients cannot rewrite firewall policy or bypass inspection
-- **VirusTotal integration** — SHA-256 hash lookup on every scanned document; optional (set `VIRUSTOTAL_API_KEY` in `.env`); fails open so the service works without a key
-- **Host-only proxy binding** — MITM proxy auto-detects the hotspot interface IP and binds exclusively to it, ensuring the firewall host's own traffic is never intercepted
+- **Transparent HTTPS interception** — MITM proxy with per-domain certificate generation; no client configuration needed behind the hotspot / host-only network
+- **Web-attack detection** — a DistilBERT classifier (SQLi, XSS, path traversal, command injection, SSTI, scanner) applied to request bodies and the *values* of query strings and JSON, plus high-precision signatures for traversal and sensitive files
+- **Prompt-injection defence for LLM traffic** — model + IDS-style signatures, scoped to LLM endpoints
+- **Secrets / DLP** — vendor-specific regex with structural validation (JWT) and placeholder exclusion
+- **PII and sensitive-content detection** — Presidio + a zero-shot NLI classifier for confidentiality
+- **Image analysis** — CLIP multi-label + YOLOv8, OCR with secret/PII scanning, steganography and trailing-data checks
+- **Document analysis** — YARA + VirusTotal hash lookup + structural anomaly detection + metadata forensics
+- **Static rule engine** — IP/port/domain/keyword rules evaluated before AI inference; configurable from the dashboard
+- **Allowlist for cert-pinned apps** — WhatsApp, Signal, Telegram etc. can tunnel through uninspected; everything else that fails MITM is blocked and logged as `PINNED-TLS`
+- **DNS-layer filtering** — NFQUEUE path parses each DNS query against `config/dns_blocklist.json` and `domain` rules
+- **Real-time dashboard** — KPI cards, threat feed, traffic charts, rule management, and AI file intake
+- **Control-plane authentication** — state-changing endpoints and internal ingest require a loopback client or a valid `FIREWALL_ADMIN_TOKEN`
+- **Hardened proxy** — refuses direct (non-redirected) connections instead of forwarding them to itself; binds only to the hotspot interface when one exists
 
 ---
 
@@ -65,37 +104,73 @@ Device (phone/laptop)
 | Image AI | `image_service/main.py` | :8001 |
 | Document AI | `document_service/main.py` | :8002 |
 | Text AI | `text_service/main.py` | :8003 |
-| Dashboard | `dashboard/` | served at `/` by orchestrator |
+| Dashboard | `dashboard/` | `/dashboard/` on the orchestrator |
 
 ---
 
 ## Installation
 
 ```bash
-# Clone the repo
 git clone https://github.com/CYC07/Bifrost-NOX.git
 cd Bifrost-NOX
+```
 
-# System dependencies (Debian / Kali / Ubuntu)
-sudo apt update && sudo apt install -y \
-    tesseract-ocr \
-    libnetfilter-queue-dev \
-    build-essential \
-    g++ \
-    libzmq3-dev \
-    python3-dev \
-    python3-venv
+### System dependencies
 
-# Python environment                                                                                                                                                          
-python3 -m venv venv                                                                                                                                                             
-source venv/bin/activate                                                                                                                                                         
-pip install -r requirements.txt                                                                                                                                                  
-                                                                                                                                                                                 
-# Build C++ engine                                                                                                                                                            
-cd network_inspector/cpp && make && cd ../..                                                                                                                                     
+**Arch / BlackArch**
+```bash
+sudo pacman -S --needed base-devel python tesseract tesseract-data-eng \
+    libnetfilter_queue libnfnetlink zeromq cppzmq perl-image-exiftool
+# hotspot mode only:
+sudo pacman -S --needed hostapd dnsmasq iptables-nft
+```
 
-# Generate the local CA certificate (required for HTTPS interception)                                                                                                         
-cd gateway && python3 cert_utils.py && cd ..
+**Debian / Kali / Ubuntu**
+```bash
+sudo apt update && sudo apt install -y build-essential g++ python3-dev python3-venv \
+    tesseract-ocr libnetfilter-queue-dev libnfnetlink-dev libzmq3-dev libcppzmq-dev \
+    libimage-exiftool-perl        # package names can differ slightly between releases
+```
+
+### Python environment
+
+```bash
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt            # CPU-only PyTorch via --extra-index-url
+python -m spacy download en_core_web_lg    # Presidio's default NLP model
+# if the download server is unavailable, install the wheel directly:
+# pip install https://github.com/explosion/spacy-models/releases/download/en_core_web_lg-3.8.0/en_core_web_lg-3.8.0-py3-none-any.whl
+```
+
+> **Notes**
+> - `requirements.txt` pins `starlette<1.0` (1.x removed the `on_startup=` argument the orchestrator uses) and installs `torch` **and** `torchvision` from the same CPU wheel index; mixing builds fails with `torchvision::nms does not exist`.
+> - **fp16 gotcha:** `transformers>=5` loads some checkpoints in half precision, which is ~14× slower on CPU. The sensitive-content model is forced to fp32 in code; keep that if you swap models.
+
+### Models
+
+| Model | Source | First run |
+|---|---|---|
+| CLIP ViT-B/32, DeBERTa-v3 zero-shot NLI, prompt-injection DeBERTa | Hugging Face Hub | downloaded automatically (~2 GB total) |
+| YOLOv8n | `yolov8n.pt` (gitignored) | place in the repo root or let ultralytics fetch it |
+| **WAF classifier** | `ml/waf/artifacts/` (**gitignored**) | **you must supply it** (see below) |
+| Content-shape router | `ml/router/artifacts/` (**gitignored**) | **you must supply it** (optional) |
+
+The trained models and datasets are not in the repo (training tooling is in `dataset_tools/`). To use your own:
+
+- **WAF:** a Hugging Face sequence-classification directory at `ml/waf/artifacts/waf_distilbert/` whose
+  `config.id2label` follows `ml/waf/taxonomy.py` (`clean, sqli, xss, path_traversal, command_injection, ssti,
+  scanner`), tokenised at `max_length=256`; or a scikit-learn pipeline `.joblib` with the same labels.
+  `WAF_MODEL_PATH` selects it and `WAF_THRESHOLD` (default `0.5`) sets the decision threshold.
+- **Router:** a `.joblib` pipeline predicting `code / web_request / prose` (`ml/router/taxonomy.py`).
+
+
+Without the WAF artifact the `web_attack` analyzer is disabled and everything else keeps working (fail-open); without the router every body is treated as a web request.
+
+### Build the C++ engine and the CA
+
+```bash
+cd network_inspector/cpp && make && cd ../..
+cd gateway && python3 cert_utils.py && cd ..      # creates the local CA; install gateway/certs/ca.crt on clients
 ```
 
 ---
@@ -113,22 +188,21 @@ source venv/bin/activate
 
 ### Gateway + AI services only (no hotspot)
 
-To inspect traffic on the local machine or route traffic manually:
-
 ```bash
 source venv/bin/activate
+export PYTHONPATH=.
 
-# Terminal 1 — AI microservices
+# AI microservices
 uvicorn master_ai.orchestrator:app --host 0.0.0.0 --port 8000 &
-uvicorn image_service.main:app --host 0.0.0.0 --port 8001 &
-uvicorn document_service.main:app --host 0.0.0.0 --port 8002 &
-uvicorn text_service.main:app --host 0.0.0.0 --port 8003 &
+uvicorn image_service.main:app     --host 0.0.0.0 --port 8001 &
+uvicorn document_service.main:app  --host 0.0.0.0 --port 8002 &
+uvicorn text_service.main:app      --host 0.0.0.0 --port 8003 &
 
-# Terminal 2 — MITM proxy
+# MITM proxy (transparent-only, see below)
 python3 gateway/proxy.py
 ```
 
-Then set your browser or system proxy to `127.0.0.1:8080`.
+> The proxy is **transparent-only**: it needs traffic to arrive via an iptables `REDIRECT`. Pointing a browser at `127.0.0.1:8080` as an explicit proxy does not work; it answers `421 Misdirected Request`. To try it locally, redirect with iptables or use the lab setup below.
 
 ### Stop everything
 
@@ -138,127 +212,196 @@ sudo ./stop_all.sh
 
 ---
 
+## Configuration
+
+All settings are environment variables. `start_all.sh` sources a `.env` in the project root if present; when starting services by hand, `set -a; source .env; set +a` first.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `AI_FAIL_MODE` | `open` | what to do when no verdict arrives: `open` allows, `closed` blocks (gateway **and** orchestrator) |
+| `AI_TIMEOUT` | `10.0` | seconds the gateway waits for a verdict |
+| `SERVICE_TIMEOUT` | `8.0` | seconds the orchestrator waits for each analysis service (keep below `AI_TIMEOUT`) |
+| `TEXT_MAX_CONCURRENCY` | `2` | concurrent text analyses (worker threads) |
+| `TEXT_CACHE_SIZE` | `2048` | verdict cache entries (identical bodies are analysed once) |
+| `WAF_ATTACK_THRESHOLD` | `0.8` | text-service block cutoff for the WAF |
+| `WAF_MAX_VALUES` / `WAF_MAX_VALUE_CHARS` | `64` / `2000` | caps for per-value scoring |
+| `WAF_MODEL_PATH` | `ml/waf/artifacts/waf_distilbert` | joblib file or HF directory |
+| `PROMPT_INJECTION_THRESHOLD` | `0.9` | injection-model block cutoff (LLM traffic only) |
+| `PII_MIN_SCORE` | `0.4` | minimum Presidio confidence for an SSN/IBAN/card match to count |
+| `WAF_SIGNATURES` | `block` | extra attack classes (SSRF, XXE, CRLF, NoSQLi, JNDI, deserialization, ...): `block`, `advisory`, `off` |
+| `SCANNER_BEHAVIOUR_POLICY` | `block` | client+host that mostly gets 404/403 across many paths (a scan, whatever its User-Agent): `block` for a 5-minute cooldown, `advisory` (log only), `off` |
+| `SCANNER_UA_POLICY` | `block` | known scanner/exploit tool in the User-Agent: `block`, `advisory` (log only), `off` |
+| `DOC_SCAN_MODE` | `advisory` | `advisory` (document-service block shown as a warning), `block` (enforce), `off` (legacy route) |
+| `DOC_SCAN_MAX_BYTES` | `20971520` | documents larger than this are allowed unanalysed |
+| `TRUSTED_VERIFY_IP` | `1` | require a trusted-domain connection to land in Microsoft's IP ranges (`0` = name-only) |
+| `SENSITIVE_THRESHOLD` / `SENSITIVE_LABELS` | `0.6` / built-in | zero-shot sensitive-content cutoff / label override |
+| `IMAGE_MAX_CONCURRENCY`, `IMAGE_OCR_MAX_FRAMES`, `IMAGE_CLIP_MULTICROP`, `IMAGE_STEGO_STRICT` | `2`, `8`, off, off | image-service tuning |
+| `HOTSPOT_IF` / `INTERNET_IF` | `wlan1` / other wlan | interfaces used by the start/stop scripts |
+| `PROXY_BIND_IP` | auto | override the proxy bind address |
+| `VIRUSTOTAL_API_KEY` | – | enables hash lookups in the document service |
+| `FIREWALL_ADMIN_TOKEN` | – | remote administration token (see below) |
+
+Edit `config/llm_hosts.json` (`hosts` and `paths`) to change what counts as LLM traffic; `config/allowed_apps.json` for cert-pinned apps; `config/dns_blocklist.json` for DNS filtering.
+
+---
+
 ## Dashboard
 
-Open `http://localhost:8000` in your browser after starting the stack.
+Open `http://localhost:8000/dashboard/` after starting the stack.
 
 | Page | Description |
 |---|---|
-| Overview | Live KPI cards, threat feed, blocked event chart |
+| Overview | Live KPI cards, threat activity, live event stream, recent threats |
 | Traffic | Throughput graphs, protocol breakdown, recent flows |
-| Rules & Policies | Static rule engine — add/remove IP, port, domain, keyword rules; manage the app allowlist |
+| Rules & Policies | Static rule engine and the cert-pinned-app allowlist |
 | Threats | AI-classified threat log with severity and confidence |
-| Logs | Raw event stream from all services |
-| Devices | Health status of all AI microservices |
+| Logs | Raw event stream (`BLOCK` / `WARN` advisory / `ALLOW`) |
+| Devices | Health of the analysis services and the gateway |
 | Reports | Session summaries and export |
 | AI Intake | Drag-and-drop file analysis (images, PDFs, documents) |
+
+| | |
+|---|---|
+| ![Threats](docs/screenshots/dashboard-threats.png) | ![Logs](docs/screenshots/dashboard-logs.png) |
+| **Threats** — severity, source/target, rule and confidence | **Logs** — every event with its verdict |
+| ![Rules](docs/screenshots/dashboard-rules.png) | ![Devices](docs/screenshots/dashboard-devices.png) |
+| **Rules & Policies** — rule engine and allowlist presets | **Devices** — service health |
 
 ---
 
 ## Allowlist (cert-pinned apps)
 
-Apps like WhatsApp, Snapchat, Signal, and Telegram pin their TLS certificates and will reject the proxy's locally-signed certificate. Without an allowlist entry, these connections are **blocked by default** and logged as `PINNED-TLS` on the dashboard.
-
-To allow them through without inspection, add the host pattern on the **Rules & Policies** page using the Allowlist panel, or via the API:
+Apps like WhatsApp, Snapchat, Signal, and Telegram pin their TLS certificates and reject the proxy's locally-signed certificate. Without an allowlist entry these connections are **blocked** and logged as `PINNED-TLS`. Add the host pattern from **Rules & Policies**, or via the API:
 
 ```bash
-# Add a host
-curl -X POST http://localhost:8000/allowlist \
-  -H "Content-Type: application/json" \
-  -d '{"host": "*.whatsapp.net"}'
-
-# List allowlisted hosts
+curl -X POST http://localhost:8000/allowlist -H "Content-Type: application/json" -d '{"host": "*.whatsapp.net"}'
 curl http://localhost:8000/allowlist
-
-# Remove a host
 curl -X DELETE http://localhost:8000/allowlist/*.whatsapp.net
 ```
 
-Preset buttons for WhatsApp, Snapchat, Signal, Telegram, and iMessage are available in the dashboard.
-
 ---
 
-## VirusTotal Integration
+## VirusTotal integration
 
-The document service computes a SHA-256 hash of every scanned file and queries the VirusTotal API. No file bytes are ever uploaded — hash-only lookups preserve privacy and keep latency low (~200–500 ms on a cache hit).
+The document service hashes every scanned file (SHA-256) and queries VirusTotal. No file bytes are uploaded. With no key set the service runs YARA-only.
 
 | Scenario | Score | Verdict |
 |---|---|---|
 | VT reports ≥ 1 malicious engine | 0.99 | BLOCK |
-| VT reports 0 detections | 0.0 | pass to YARA |
-| File not in VT database (404) | 0.0 | pass to YARA |
-| API unavailable / no key set | 0.0 | pass to YARA |
-
-To enable, add your key to `.env` in the project root (already gitignored):
+| 0 detections / not found / API unavailable | 0.0 | pass to YARA |
 
 ```bash
-echo "VIRUSTOTAL_API_KEY=your_key_here" > .env
+echo "VIRUSTOTAL_API_KEY=your_key_here" >> .env     # .env is gitignored
 ```
-
-`./start_all.sh` picks it up automatically. Without a key the service runs with YARA-only detection.
 
 ---
 
-## Control-Plane Authentication
+## Control-plane authentication
 
-The orchestrator on `:8000` is reachable by hotspot clients, so admin actions are gated. Requests to state-changing endpoints (`POST/DELETE /rules`, `/allowlist`, `/test_attack`) and internal ingest (`/analyze_traffic`, `/log_event`) are allowed only when they come from a **loopback client** (the operator on `localhost`) or carry a valid admin token. Read-only dashboard GETs stay open.
-
-The operator on `localhost` needs no configuration. To administer from another machine, set a token in `.env`:
+The orchestrator on `:8000` is reachable by clients, so admin actions are gated: `POST/DELETE /rules`, `/allowlist`, `/test_attack` and the internal ingest endpoints (`/analyze_traffic`, `/log_event`) accept only a **loopback client** or a valid admin token. Read-only dashboard GETs stay open.
 
 ```bash
 echo "FIREWALL_ADMIN_TOKEN=$(openssl rand -hex 24)" >> .env
-```
-
-Then send it as a header (`X-Admin-Token: <token>`) or query param (`?token=<token>`). Without a token set, only loopback can mutate policy.
-
-```bash
-# From a remote admin host:
 curl -X POST http://<firewall-ip>:8000/allowlist \
-  -H "X-Admin-Token: $FIREWALL_ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
+  -H "X-Admin-Token: $FIREWALL_ADMIN_TOKEN" -H "Content-Type: application/json" \
   -d '{"host": "*.example.com"}'
 ```
 
 ---
 
-## Network Topology (hotspot mode)
+## Testing
 
-| Item | Value |
-|---|---|
-| Hotspot SSID | FYP-AI-Firewall |
-| Subnet | 192.168.50.0/24 |
-| Gateway | 192.168.50.1 |
-| Proxy port | 8080 |
-| Internet uplink | `eth0` or USB tether |
+```bash
+source venv/bin/activate
+PYTHONPATH=. pytest tests dataset_tools/tests -q
+```
+
+Baseline with all models and data present (code at `fa0bfe4`): **1595 passed, 3 skipped, 22 xfailed, 0 failed** (18 of the xfails are the strict, documented WAF-model gaps in `tests/waf_audit/known_gaps.py`). The IBAN and encoded-JSON fixes since then add 65 tests; on a machine without the Hugging Face models and the git-ignored WAF seed data they give 1018 passed, 98 skipped, and 18 failures/errors, all from the missing CLIP model and `dataset_tools/waf/data/seed_attacks.jsonl`.
+
+- **4 xfailed** are known model limitations recorded as tests (two are `strict`, so the suite goes red if they ever start passing).
+- Some tests are skipped when model artifacts are absent.
+- `tests/data/pi_eval.jsonl` is a small labelled attack/benign set used by the prompt-injection tests.
+- `dataset_tools/` holds the dataset builders, trainers and Colab notebooks (WAF, router, image corpus); see its README. Datasets and built splits are git-ignored.
+
+## Trying it in a VM
+
+VirtualBox **NAT mode does not work** for this: NAT traffic is re-originated by the VirtualBox process, so it never traverses the host's `PREROUTING`/`FORWARD` chains and the REDIRECT never fires. Use a host-only network and make the host the gateway, exactly like the hotspot:
+
+1. Create `vboxnet0` (`192.168.56.1/24`) with VirtualBox's DHCP server, and put the VM's adapter on it.
+2. On the host: bring the interface up, `sysctl net.ipv4.ip_forward=1`, `iptables -t nat -A POSTROUTING -s 192.168.56.0/24 -o <uplink> -j MASQUERADE`, then `HOTSPOT_IF=vboxnet0 INTERNET_IF=<uplink> sudo ./start_network.sh`.
+3. Stop `systemd-networkd`/NetworkManager from managing `vboxnet0` (a catch-all DHCP profile otherwise adds a bogus default route through it).
+4. Install `gateway/certs/ca.crt` in the guest (Windows: `certutil -addstore -f Root ca.crt`; Android: "VPN and apps").
+5. Keep the guest clock correct (leaf certs are valid from now − 1 day, but not further back), and on Windows use `curl --ssl-no-revoke` (Schannel hard-fails on certs with no revocation endpoint).
 
 ---
 
-## Project Structure
+## Network topology
+
+| Item | Hotspot mode | VM lab |
+|---|---|---|
+| Client interface | `wlan1` (AP) | `vboxnet0` |
+| Subnet / gateway | `192.168.50.0/24` / `192.168.50.1` | `192.168.56.0/24` / `192.168.56.1` |
+| SSID | FYP-AI-Firewall | – |
+| Proxy port | 8080 | 8080 |
+| Uplink | `eth0`/`wlan0` or USB tether | `wlan0`/`eth0` |
+
+---
+
+## Project structure
 
 ```
 ai_firewall/
-├── common/               # Shared schemas, utilities, allowlist module
-├── config/               # Persisted rules, allowlist, and DNS blocklist (JSON)
-├── dashboard/            # React 18 + Babel frontend (served by orchestrator)
-├── document_service/     # YARA + VirusTotal, metadata forensics, structural anomaly, content keywords
-├── gateway/              # MITM proxy, TLS engine, certificate authority
+├── common/               # schemas, FileSniffer, allowlist, llm_scope (LLM-traffic detection)
+├── config/               # rules, allowlist, DNS blocklist, llm_hosts (JSON)
+├── dashboard/            # React 18 + Babel frontend (served by the orchestrator)
+├── document_service/     # YARA + VirusTotal, metadata forensics, structural anomaly
+├── gateway/              # MITM proxy, TLS engine, certificate authority, HTTP parser
 ├── image_service/        # CLIP, YOLOv8, Tesseract OCR
-├── master_ai/            # Orchestrator, rule engine
+├── master_ai/            # orchestrator, rule engine
+├── ml/
+│   ├── waf/              # web-attack classifier + request-target inspection (target.py)
+│   ├── router/           # content-shape router
+│   ├── sensitive/        # zero-shot sensitive-content classifier
+│   ├── prompt_injection/ # injection model, signatures, prompt extraction, HTML reduction
+│   ├── secrets/          # secret patterns, validators, detector
+│   └── image/            # CLIP labels/classifier, OCR scan, stego, file safety
 ├── network_inspector/    # C++ NFQUEUE engine + Python ZMQ bridge
-├── text_service/         # Presidio PII, sentence-transformers, SQLi
-├── start_all.sh          # Start full stack
-├── start_network.sh      # iptables + C++ engine + AI brain
-├── stop_all.sh           # Stop everything
+├── text_service/         # analysis pipeline (secrets, PII, WAF, injection, sensitive)
+├── tests/                # pytest suite (+ tests/data eval set)
+├── dataset_tools/        # dataset builders, trainers, notebooks (not imported at runtime)
+├── docs/screenshots/     # README images
+├── start_all.sh · start_network.sh · stop_all.sh
 └── requirements.txt
 ```
 
 ---
 
-## Tech Stack
+## Known limitations
 
-**AI / ML:** PyTorch · CLIP · YOLOv8 (ultralytics) · Tesseract OCR · sentence-transformers · Presidio · YARA · VirusTotal API · scikit-learn (Isolation Forest)
+- **Request targets and bodies, plus scanner fingerprints.** Cookies and other headers and WebSocket frames are not inspected; the one exception is the `User-Agent` (and the scanner-only `Acunetix-Aspect*` / `X-Scan-Memo` headers), matched against a list of known scanner and exploit tools (`ml/waf/scanner.py`). Measured: 68 of 84 real scanner names recognised (38% before the list was extended with names from the misses, so the 81% is in-sample), 0 false positives on 22,609 real browser/client user-agents. The WAF model's own `scanner` class is weak and never sees headers. Scanners that spoof the User-Agent are caught by behaviour instead (`ml/waf/behaviour.py`): per client and host, a minute of responses that are >=85% not-found/forbidden across 15+ distinct paths spread over 5+ seconds (or three well-known recon path families that mostly do not exist) blocks that client for that host for 5 minutes. Replaying SecLists wordlists (common, big, raft-medium) with a browser User-Agent: flagged after 25 requests at 1 req/s, ~50 at 10 req/s, ~250 at 50 req/s and ~1,000 at 200 req/s (5 s of traffic); 2,000 simulated benign sessions of real paths were never flagged at 0-40% error rates (15 at 60%, half at 80%). Known limits: a scan slower than ~25 requests a minute is not seen, and the state is per gateway process.
+- **Pinned clients** (apps and SDKs that ignore the system CA store) cannot be inspected; they are blocked or allowlisted.
+- **Traffic that never crosses the network** (a local LLM on the same machine) is invisible to a network firewall.
+- **Model false positives remain** in places: the WAF on benign shell commands, HTML, logs and config text, and the prompt-injection model on page-like text (login pages) and on ordinary sentences such as "ignore the typos in my message". They are tracked as open issues rather than hidden by thresholds.
+- **Prompt-injection model (LLM requests only):** the checkpoint saturates on developer system prompts, so system-role text is not model-scored (signatures still scan it) and borderline scores need a structural cue or become a dashboard warning instead of a block. On public benign prompts this cut false blocks from 20.7 % to 0.7 %, at a cost: block recall on public injection sets fell from 67 % to 62 % (a further 5 % are now warnings). Those public sets are noisy, and a 90 % recall target is not reachable with this checkpoint. `PROMPT_INJECTION_SOLO=0.9` restores the old cutoff for user text.
+- **Sensitive-content model is a weak topic detector** (AUC 0.73 on real documents). Calibration made it far less trigger-happy (consumer chat bodies blocked 52 % → 0.8 % in a 500-body test; benign public text blocked 14 % → 2.6 %), but it still catches only about 40-50 % of genuinely sensitive documents (33-66 real-source documents per estimate, so wide error bars), and first-person medical statements ("my son was prescribed antibiotics…") are still blocked: 3 of 40 in our test. It only blocks outbound traffic; inbound findings are warnings (`SENSITIVE_INBOUND=block` changes that). Chat-API bodies are judged on the user/assistant text, never the system prompt.
+- **Documents:** PDFs and Office files are scanned (false positives 0 of 568 benign files; about half of a 50-file malicious-document test set detected, 27 of 50) but the verdict is advisory unless `DOC_SCAN_MODE=block`. Legacy Office binaries (`.doc`/`.xls`/`.ppt`) are blocked outright instead of analysed (`LEGACY_OFFICE_POLICY=allow` disables that); other OLE containers are not analysed.
+- **Images:** OCR now reads secrets across more fonts and themes, including dark ones (42 → 47 of 48 test screenshots, 0 of 48 benign false positives) at about 1.6× the OCR time. CLIP and YOLO are unchanged, and the positive side of CLIP is uncalibrated for lack of labelled images.
+- **Attack classes outside the model's taxonomy** (SSRF, XML external entities, CRLF injection, NoSQL operator injection, JNDI/Log4Shell, Java/.NET/Python deserialization, Shellshock, prototype pollution, LDAP and SSI/ESI injection) are matched by precise regular expressions (`ml/waf/signatures.py`), not by the model, on outbound non-LLM bodies and request targets. Against the OWASP CRS regression tests for the classes targeted (attack in the URL or body) it catches 151 of 181 (83%); CRS's broad Java keyword rules (any parameter containing `java.lang.Runtime`, `ProcessBuilder`, ...) are deliberately not matched (12 of 707), and attacks delivered in a header (for example Log4Shell in `User-Agent`) are not scanned. False positives: 0 flagged on 852,000+ real benign requests and texts except 23 obfuscated phishing URLs that the source dataset mislabels as benign.
+- **Encoded input:** form and query values, and percent-encoded JSON string values, are decoded (until stable, at most four layers) before WAF scoring, but only when the decoded value is attack-shaped (an active character, SQL phrase or traversal signature); other encodings (base64, unicode escapes) are not decoded.
+- **WAF training data bias (known):** the first WAF model was trained on data where the carrier shape predicted the label (every benign JSON body scored `sqli`). Per-value scoring and the policy layer work around it; a retrain on shape-balanced data is prepared in `dataset_tools/waf/v2` (Colab notebook `dataset_tools/waf/train_v2.ipynb`) but has not been run.
+- **WAF audit (`tests/waf_audit`, 468 tests, 2026-11-05):** padding, value-cap, quote-free SQLi, key/name/path, sensitive-file, marker-gate and non-string-input evasions were found and fixed in code with no change in false positives. What remains is the v1 model itself: it blocks about half of hand-written ordinary shell, HTML, config and code samples (8 of 21 ordinary form/JSON bodies end to end; request targets are clean, 0 of 20), blocks 80% of real held-out payloads when sent bare (path traversal 64%, command injection 78%; 97% form-encoded), and cannot detect scanners (the WAF never sees request headers). No decision rule fixes this: requiring a strong marker removes the false positives but cuts real held-out recall from 89% to 33%.
+- **IBAN detection:** IBANs were never detected before because the services asked Presidio for `IBAN` (its entity is `IBAN_CODE`, and an unknown name is silently ignored). Presidio's pattern also ran into the next word after an IBAN whose account part is whole 4-character groups (ES, SE, AT, BE…), which a same-length preprocessing step now prevents. Measured outbound on synthetic data: 252 of 288 valid IBANs blocked (9 countries, compact and spaced, with and without context words). The 36 not blocked are bare compact IBANs with no context, which are advisory by design. A hand-written set we did not tune on: 10 of 10 blocked. No blocks on 288 broken-checksum variants, 62 benign ids/tokens/addresses, or 20 hand-written benign strings. Before the fix, 0 of the 32 documentation-example IBAN probes were blocked, and 8 broken-checksum IBANs were blocked as "credit card". Inbound is advisory; the image OCR path blocks any checksum-valid IBAN (288 of 288). Lower-case IBANs and IBANs split by OCR errors are not detected.
+- **Prompt-injection signatures are a tripwire**, not a defence: paraphrases get through outside LLM scope (recall ≈ 83 % on the bundled eval set, 0 false positives on its benign items).
+- **Long prompts:** only up to 16 windows of 1,500 characters are scored, so an injection in the middle of a very large (>~16 KB) prompt can be missed.
+- Single-process services; sized for a lab / small network, not for production load.
 
-**Backend:** Python 3.11 · Starlette · uvicorn · httpx · ZeroMQ · cryptography
+---
+
+## Tech stack
+
+**AI / ML:** PyTorch (CPU) · Hugging Face Transformers · DistilBERT · DeBERTa-v3 · CLIP · YOLOv8 (ultralytics) · Tesseract OCR · sentence-transformers · Presidio · spaCy · YARA · scikit-learn · VirusTotal API
+
+**Backend:** Python 3.11+ · Starlette · uvicorn · httpx · ZeroMQ · cryptography
 
 **Network:** iptables · NFQUEUE · C++17 · libnetfilter-queue · Scapy
 
@@ -268,6 +411,6 @@ ai_firewall/
 
 ## License
 
-MIT — see `LICENSE` for details.
+Released under the MIT License.
 
-> **Disclaimer:** This project is a research prototype built for a controlled lab/hotspot environment. It is not hardened for production deployment. MITM inspection of third-party traffic may be subject to legal restrictions in your jurisdiction — only use on networks you own or have explicit permission to monitor.
+> **Disclaimer:** This project is a research prototype built for a controlled lab/hotspot environment. It is not hardened for production deployment. MITM inspection of third-party traffic may be subject to legal restrictions in your jurisdiction — only use it on networks you own or have explicit permission to monitor.

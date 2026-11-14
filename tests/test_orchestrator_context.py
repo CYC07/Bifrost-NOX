@@ -115,6 +115,16 @@ def test_request_target_and_waf_blocks_get_meaningful_labels():
     assert orch._classify_reason("Blocked by: code, web_attack")[0] != "Anomalous Content"
 
 
+def test_secret_and_pii_blocks_are_not_shown_as_anomalous_content():
+    assert orch._classify_reason("Blocked by: code")[0] == "Secret Leak"
+    assert orch._classify_reason("Blocked by: pattern")[0] == "PII Exposure"
+    assert orch._classify_reason("Blocked by: code, pattern")[0] in ("Secret Leak", "PII Exposure")
+    # existing labels must keep winning where they match first
+    assert orch._classify_reason("Blocked by: prompt_injection_signature")[0] == "Prompt Injection"
+    assert orch._classify_reason("Blocked by: request_target")[0] == "Malicious Request Target"
+    assert orch._classify_reason("Blocked by: web_attack")[0] == "Web Attack"
+
+
 def test_prompt_injection_block_is_labelled_prompt_injection_not_command_injection():
     t, sev, _ = orch._classify_reason("Blocked by: prompt_injection")
     assert t == "Prompt Injection" and sev == "critical"

@@ -1,0 +1,1 @@
+nic1=nat (original), adb forwards 5555/5557
