@@ -2,11 +2,14 @@
 
 // ====== AI Intake (uploads) ======
 const UploadsPage = ({ uploaded, onRefresh }) => {
-  const [items, setItems] = React.useState(uploaded || []);
+  const I = window.FW.intake;
+  // `local` rows exist only in this browser: files still uploading, and uploads the server did not accept (kept visible
+  // with the reason, instead of vanishing when the page re-reads the server's queue).
+  const [local, setLocal] = React.useState([]);
   const [drag, setDrag] = React.useState(false);
+  const [open, setOpen] = React.useState({});
   const inputRef = React.useRef(null);
-
-  React.useEffect(() => { setItems(uploaded || []); }, [uploaded]);
+  const items = I.merge(local, uploaded);
 
   const detectType = (f) => {
     if (f.type && f.type.startsWith('image')) return { kind: 'IMG', ct: 'image' };
@@ -18,39 +21,31 @@ const UploadsPage = ({ uploaded, onRefresh }) => {
   const fmtSize = (n) => n > 1024 * 1024 ? `${(n / (1024 * 1024)).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
 
   const onFiles = async (files) => {
-    const arr = Array.from(files);
-    const pending = arr.map(f => ({
-      name: f.name,
-      size: fmtSize(f.size),
-      type: detectType(f).kind,
-      status: 'analyzing',
-      time: 'just now',
-      tags: ['Uploading…'],
-    }));
-    setItems(prev => [...pending, ...prev]);
+    const batch = Array.from(files).map(f => {
+      const info = { name: f.name, size: fmtSize(f.size), type: detectType(f).kind };
+      return { f, info, row: I.pendingRow(info) };
+    });
+    setLocal(prev => [...batch.map(x => x.row), ...prev]);
 
-    for (const f of arr) {
-      const { ct } = detectType(f);
+    for (const x of batch) {
+      let res;
       try {
-        const res = await window.FW.api.upload(f, ct);
-        const status = (res && res.status || '').toLowerCase();
-        setItems(prev => prev.map(p => p.name === f.name && p.status === 'analyzing'
-          ? {
-            ...p,
-            status: status === 'block' ? 'flagged' : 'indexed',
-            tags: [`risk=${res?.risk_level || 'unknown'}`, (res?.reason || '').slice(0, 60)],
-          }
-          : p));
+        res = await window.FW.api.upload(x.f, detectType(x.f).ct);
       } catch (err) {
-        setItems(prev => prev.map(p => p.name === f.name && p.status === 'analyzing'
-          ? { ...p, status: 'flagged', tags: ['Upload failed'] }
-          : p));
+        res = { ok: false, httpStatus: 0, error: String((err && err.message) || err) };
+      }
+      if (res.ok) {
+        // the server stored the full result: re-read its queue, then drop the local placeholder
+        if (onRefresh) await onRefresh();
+        setLocal(prev => prev.map(r => r === x.row ? { ...r, state: 'done' } : r));
+      } else {
+        setLocal(prev => prev.map(r => r === x.row ? I.failedRow(x.info, res) : r));
       }
     }
-
-    // refresh backend-held queue
-    if (onRefresh) onRefresh();
   };
+
+  const counts = I.counts(items);
+  const hasFailed = local.some(r => r.state === 'failed');
 
   return (
     <>
@@ -120,9 +115,10 @@ const UploadsPage = ({ uploaded, onRefresh }) => {
         <div className="card-head">
           <div>
             <h3>Intake queue</h3>
-            <div className="sub">{items.length} items · {items.filter(i => i.status === 'indexed').length} indexed · {items.filter(i => i.status === 'flagged').length} flagged</div>
+            <div className="sub">{counts.total} items · {counts.indexed} indexed · {counts.review} review · {counts.flagged} flagged · {counts.error} errors</div>
           </div>
           <div className="hstack">
+            {hasFailed && <button className="btn btn-sm" onClick={() => setLocal(prev => prev.filter(r => r.state !== 'failed'))}>Dismiss errors</button>}
             <button className="btn btn-sm" onClick={onRefresh}><Icon name="refresh"/>Refresh</button>
           </div>
         </div>
@@ -139,30 +135,49 @@ const UploadsPage = ({ uploaded, onRefresh }) => {
             </tr></thead>
             <tbody>
               {items.length === 0 && <tr><td colSpan="7" className="muted" style={{ textAlign: 'center', padding: 20 }}>No uploads yet — drop files above.</td></tr>}
-              {items.map((f, i) => (
-                <tr key={f.name + f.time + i}>
-                  <td>
-                    <div style={{ width: 28, height: 28, borderRadius: 5, background: 'var(--bg-sunken)', display: 'grid', placeItems: 'center' }}>
-                      <Icon name={f.type === 'IMG' ? 'image' : 'file'} size={14}/>
-                    </div>
-                  </td>
-                  <td><strong>{f.name}</strong></td>
-                  <td><span className="chip">{f.type}</span></td>
-                  <td className="mono" style={{ fontSize: 12 }}>{f.size}</td>
-                  <td>
-                    <div className="hstack" style={{ flexWrap: 'wrap', gap: 4 }}>
-                      {(f.tags || []).map((t, j) => <span key={j} className="chip" style={{ fontSize: 10 }}>{t}</span>)}
-                    </div>
-                  </td>
-                  <td>
-                    <Badge tone={f.status === 'indexed' ? 'ok' : f.status === 'analyzing' ? 'warn' : 'danger'}>
-                      <Dot tone={f.status === 'indexed' ? 'ok' : f.status === 'analyzing' ? 'warn' : 'danger'} live={f.status === 'analyzing'}/>
-                      {f.status}
-                    </Badge>
-                  </td>
-                  <td className="muted" style={{ fontSize: 12 }}>{f.time}</td>
-                </tr>
-              ))}
+              {items.map((f, i) => {
+                const key = f.name + f.time + i;
+                const lines = I.detailLines(f);
+                const isOpen = !!open[key];
+                const tone = I.tone(f.status);
+                return (
+                  <React.Fragment key={key}>
+                    <tr onClick={lines.length ? () => setOpen(o => ({ ...o, [key]: !o[key] })) : undefined}
+                        style={lines.length ? { cursor: 'pointer' } : undefined}
+                        title={lines.length ? 'Click to show everything the AI reported' : undefined}>
+                      <td>
+                        <div style={{ width: 28, height: 28, borderRadius: 5, background: 'var(--bg-sunken)', display: 'grid', placeItems: 'center' }}>
+                          <Icon name={f.type === 'IMG' ? 'image' : 'file'} size={14}/>
+                        </div>
+                      </td>
+                      <td><strong>{f.name}</strong></td>
+                      <td><span className="chip">{f.type}</span></td>
+                      <td className="mono" style={{ fontSize: 12 }}>{f.size}</td>
+                      <td>
+                        <div className="hstack" style={{ flexWrap: 'wrap', gap: 4 }}>
+                          {(f.tags || []).map((t, j) => <span key={j} className="chip" style={{ fontSize: 10, whiteSpace: 'normal', textAlign: 'left' }}>{t}</span>)}
+                          {lines.length > 0 && <span className="muted" style={{ fontSize: 10 }}>{isOpen ? '▾ hide details' : '▸ details'}</span>}
+                        </div>
+                      </td>
+                      <td>
+                        <Badge tone={tone}>
+                          <Dot tone={tone} live={f.status === 'analyzing'}/>
+                          {f.status}
+                        </Badge>
+                      </td>
+                      <td className="muted" style={{ fontSize: 12 }}>{f.time}</td>
+                    </tr>
+                    {isOpen && lines.length > 0 && (
+                      <tr>
+                        <td></td>
+                        <td colSpan="6">
+                          <pre className="mono" style={{ margin: 0, padding: '8px 0', fontSize: 11, whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>{lines.join('\n')}</pre>
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
+                );
+              })}
             </tbody>
           </table>
         </div>

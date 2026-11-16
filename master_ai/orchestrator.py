@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import ipaddress
 import datetime
 import json
 import logging
@@ -247,6 +248,7 @@ async def analyze_traffic(request: Request) -> JSONResponse:
     )
 
     upload_record: dict[str, Any] | None = None
+    analysis_error: str | None = None      # why an uploaded file was NOT analysed (the returned verdict stays fail-open)
 
     try:
         t0 = time.monotonic()
@@ -273,7 +275,8 @@ async def analyze_traffic(request: Request) -> JSONResponse:
                 if resp.status_code == 200:
                     verdict = AggregatedVerdict(**resp.json())
                 else:
-                    verdict = _no_verdict(f"image service HTTP {resp.status_code}", verdict)
+                    analysis_error = f"image service HTTP {resp.status_code}"
+                    verdict = _no_verdict(analysis_error, verdict)
 
             elif content_type == ContentType.DOCUMENT and file_item:
                 blob = await file_item.read()
@@ -293,19 +296,19 @@ async def analyze_traffic(request: Request) -> JSONResponse:
                             detailed_findings=verdict.detailed_findings,
                         )
                 else:
-                    verdict = _no_verdict(f"document service HTTP {resp.status_code}", verdict)
+                    analysis_error = f"document service HTTP {resp.status_code}"
+                    verdict = _no_verdict(analysis_error, verdict)
 
         _RECENT_LATENCIES.append(round((time.monotonic() - t0) * 1000, 1))
     except Exception as exc:
         logger.error(f"Analysis failed: {type(exc).__name__}: {exc}")
-        verdict = _no_verdict(f"{type(exc).__name__}: {exc}".rstrip(": "), verdict)
+        analysis_error = f"{type(exc).__name__}: {exc}".rstrip(": ")
+        verdict = _no_verdict(analysis_error, verdict)
 
     if upload_record is not None:
-        status = str(verdict.status).lower()
-        upload_record["status"] = (
-            "flagged" if status == "block" else "indexed" if status == "allow" else "analyzing"
-        )
-        upload_record["tags"] = _upload_tags(verdict)
+        upload_record["status"] = _upload_status(verdict, analysis_error)
+        upload_record["tags"] = _upload_tags(verdict, analysis_error)
+        upload_record["detail"] = _upload_detail(verdict, analysis_error)
         UPLOAD_QUEUE.appendleft(upload_record)
 
     update_stats(verdict, source_ip, destination_ip)
@@ -330,11 +333,47 @@ def _build_upload_record(file_item: Any, blob: bytes, kind: str) -> dict[str, An
     }
 
 
-def _upload_tags(verdict: AggregatedVerdict) -> list[str]:
+_MAX_FINDINGS, _MAX_SCORES, _MAX_TAGS = 25, 12, 6
+
+
+def _findings_of(verdict: AggregatedVerdict) -> list[str]:
+    """The textual findings the analyzers reported, as short strings (non-strings ignored, bounded)."""
+    df = verdict.detailed_findings if isinstance(verdict.detailed_findings, dict) else {}
+    raw = df.get("findings")
+    out = [_short_msg(f, 240) for f in (raw if isinstance(raw, list) else []) if isinstance(f, str) and f.strip()]
+    return out[:_MAX_FINDINGS]
+
+
+def _upload_status(verdict: AggregatedVerdict, analysis_error: str | None = None) -> str:
+    """flagged = blocked, review = advisory (CENSOR), indexed = analysed and allowed, error = NOT analysed."""
+    if analysis_error:
+        return "error"
+    status = str(verdict.status).lower()
+    return "flagged" if status.endswith("block") else "review" if status.endswith("censor") else "indexed"
+
+
+def _upload_tags(verdict: AggregatedVerdict, analysis_error: str | None = None) -> list[str]:
+    if analysis_error:
+        return ["Analysis unavailable - file not analysed", _short_msg(analysis_error, 70)]
     tags = [f"risk={verdict.risk_level}"]
     if verdict.reason:
         tags.append(_short_msg(verdict.reason, 60))
+    for f in _findings_of(verdict):
+        if len(tags) >= _MAX_TAGS:
+            break
+        t = _short_msg(f, 70)
+        if t != tags[-1]:
+            tags.append(t)
     return tags
+
+
+def _upload_detail(verdict: AggregatedVerdict, analysis_error: str | None = None) -> dict[str, Any]:
+    """Everything the analyzers said, bounded, for the dashboard's expandable row."""
+    df = verdict.detailed_findings if isinstance(verdict.detailed_findings, dict) else {}
+    raw = df.get("scores") if isinstance(df.get("scores"), dict) else {}
+    scores = {str(k)[:40]: round(float(v), 3) for k, v in list(raw.items())[:_MAX_SCORES] if isinstance(v, (int, float)) and not isinstance(v, bool)}
+    return {"reason": _short_msg(verdict.reason, 240), "risk": str(verdict.risk_level), "findings": _findings_of(verdict),
+            "scores": scores, "error": _short_msg(analysis_error, 240) if analysis_error else ""}
 
 
 async def get_stats(request: Request) -> JSONResponse:
@@ -674,6 +713,8 @@ _MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 
 def _is_loopback(host: str) -> bool:
+    if not isinstance(host, str):
+        return False
     return host in ("127.0.0.1", "::1", "localhost") or host.startswith("127.")
 
 
@@ -685,7 +726,27 @@ def _path_protected(path: str, method: str) -> bool:
     return False
 
 
-def _authorize(client_host: str, path: str, method: str, token: str, admin_token: str) -> bool:
+def _ip(host):
+    """Parsed address (IPv4-mapped IPv6 unwrapped), or None for anything that is not a usable address."""
+    try:
+        a = ipaddress.ip_address(str(host).strip().split("%", 1)[0])
+    except ValueError:
+        return None
+    if isinstance(a, ipaddress.IPv6Address) and a.ipv4_mapped is not None:
+        a = a.ipv4_mapped
+    return None if a.is_unspecified else a
+
+
+def _same_host(client_host, server_host) -> bool:
+    """True when the connection's source address EQUALS the address it was made to: the machine talking to itself
+    (e.g. the operator's browser on the lab laptop opening http://192.168.56.1:8000, where the kernel uses
+    192.168.56.1 as the source). A remote machine cannot complete a TCP handshake with the server's own address
+    as its source, so this cannot be claimed from the network. Unknown/unparseable/unspecified addresses never match."""
+    c, s = _ip(client_host), _ip(server_host)
+    return c is not None and s is not None and c == s
+
+
+def _authorize(client_host: str, path: str, method: str, token: str, admin_token: str, server_host: str = "") -> bool:
     """Pure authorization decision. True = allow.
 
     Testable without a live server (Starlette's TestClient reports a synthetic
@@ -693,7 +754,7 @@ def _authorize(client_host: str, path: str, method: str, token: str, admin_token
     """
     if not _path_protected(path, method):
         return True
-    if _is_loopback(client_host):
+    if _is_loopback(client_host) or _same_host(client_host, server_host):
         return True
     return bool(admin_token) and bool(token) and token == admin_token
 
@@ -701,8 +762,10 @@ def _authorize(client_host: str, path: str, method: str, token: str, admin_token
 class AdminAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         client_host = request.client.host if request.client else ""
+        server = request.scope.get("server")           # the local socket address, never taken from a header
+        server_host = server[0] if server else ""
         token = request.headers.get("x-admin-token", "") or request.query_params.get("token", "")
-        if not _authorize(client_host, request.url.path, request.method, token, ADMIN_TOKEN):
+        if not _authorize(client_host, request.url.path, request.method, token, ADMIN_TOKEN, server_host):
             logger.warning("Blocked admin action %s %s from %s", request.method, request.url.path, client_host)
             return JSONResponse(
                 {"error": "forbidden: admin action requires a loopback client or a valid FIREWALL_ADMIN_TOKEN"},
