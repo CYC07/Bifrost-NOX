@@ -14,6 +14,17 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
+# Everything below uses repo-relative paths; make that true wherever the script is called from.
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$REPO_DIR" || exit 1
+# shellcheck source=network_inspector/venv_python.sh
+source "$REPO_DIR/network_inspector/venv_python.sh"
+
+# Absolute venv interpreter, resolved BEFORE any firewall rule is touched: under sudo a bare python3 is the
+# system one, which has no zmq (the brain died at import and the engine then stalled DNS). To use another
+# interpreter run:  sudo PYTHON=/abs/path/to/python ./start_network.sh   (sudo resets the environment otherwise)
+PYTHON="$(resolve_venv_python "$REPO_DIR")" || exit 1
+
 # Auto-detect which wlan is in AP mode if not supplied by caller.
 _ap_iface=""
 for _iface in "${HOTSPOT_IF:-wlan1}" wlan0 wlan1; do
@@ -69,10 +80,16 @@ echo "Network layer rules applied (hotspot NAT/FORWARD from wifi-hotspot.sh is p
 
 echo "[3/3] Starting inspection engine..."
 echo "  -> AI Brain (ZMQ bridge)"
-nohup python3 network_inspector/ai_brain.py > brain.log 2>&1 &
+echo "     python: $PYTHON"
+nohup "$PYTHON" network_inspector/ai_brain.py > brain.log 2>&1 &
 BRAIN_PID=$!
 echo "     PID: $BRAIN_PID"
 sleep 1
+if ! kill -0 "$BRAIN_PID" 2>/dev/null; then
+    echo "ERROR: AI Brain exited during startup; not starting the engine. Last lines of brain.log:" >&2
+    tail -n 15 brain.log >&2
+    exit 1
+fi
 
 echo "  -> C++ Firewall Engine (binds NFQUEUE $QUEUE_NUM)"
 # Background so callers (start_all.sh) aren't blocked. Stop via stop_all.sh
