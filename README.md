@@ -85,7 +85,7 @@ The name alone is never enough, because SNI and `Host` are set by the client. A 
 - **Image analysis** — CLIP multi-label + YOLOv8, OCR with secret/PII scanning, steganography and trailing-data checks
 - **Document analysis** — YARA + VirusTotal hash lookup + structural anomaly detection + metadata forensics
 - **Static rule engine** — IP/port/domain/keyword rules evaluated before AI inference; configurable from the dashboard
-- **Allowlist for cert-pinned apps** — WhatsApp, Signal, Telegram etc. can tunnel through uninspected; everything else that fails MITM is blocked and logged as `PINNED-TLS`
+- **Allowlist for cert-pinned apps** — WhatsApp, Signal, Telegram etc. can tunnel through uninspected; a client that rejects the proxy's certificate is blocked and logged as `PINNED-TLS` (an unreachable origin server is a different event, `UPSTREAM-FAIL`)
 - **DNS-layer filtering** — NFQUEUE path parses each DNS query against `config/dns_blocklist.json` and `domain` rules
 - **Real-time dashboard** — KPI cards, threat feed, traffic charts, rule management, and AI file intake
 - **Control-plane authentication** — state-changing endpoints and internal ingest require a loopback client or a valid `FIREWALL_ADMIN_TOKEN`
@@ -221,6 +221,11 @@ All settings are environment variables. `start_all.sh` sources a `.env` in the p
 | `AI_FAIL_MODE` | `open` | what to do when no verdict arrives: `open` allows, `closed` blocks (gateway **and** orchestrator) |
 | `AI_TIMEOUT` | `10.0` | seconds the gateway waits for a verdict |
 | `SERVICE_TIMEOUT` | `8.0` | seconds the orchestrator waits for each analysis service (keep below `AI_TIMEOUT`) |
+| `UPSTREAM_CONNECT_TIMEOUT` | `5.0` | seconds the gateway waits per attempt to connect to the real server; on failure the client gets a `502` page and an `UPSTREAM-FAIL` event |
+| `UPSTREAM_CONNECT_RETRIES` | `1` | extra connect attempts after a timeout or transient network error (a refused connection is not retried) |
+| `BRAIN_TIMEOUT_MS` | `1500` | C++ engine: how long to wait for the AI brain's DNS/FTP verdict before giving up |
+| `BRAIN_COOLDOWN_MS` | `3000` | C++ engine: after the brain fails, skip it this long (no per-packet waiting) and then try again |
+| `BRAIN_FAIL_MODE` | `open` | C++ engine: `open` accepts DNS/FTP packets while the brain is down, `closed` drops them |
 | `TEXT_MAX_CONCURRENCY` | `2` | concurrent text analyses (worker threads) |
 | `TEXT_CACHE_SIZE` | `2048` | verdict cache entries (identical bodies are analysed once) |
 | `WAF_ATTACK_THRESHOLD` | `0.8` | text-service block cutoff for the WAF |
@@ -271,7 +276,7 @@ Open `http://localhost:8000/dashboard/` after starting the stack.
 
 ## Allowlist (cert-pinned apps)
 
-Apps like WhatsApp, Snapchat, Signal, and Telegram pin their TLS certificates and reject the proxy's locally-signed certificate. Without an allowlist entry these connections are **blocked** and logged as `PINNED-TLS`. Add the host pattern from **Rules & Policies**, or via the API:
+Apps like WhatsApp, Snapchat, Signal, and Telegram pin their TLS certificates and reject the proxy's locally-signed certificate. Without an allowlist entry these connections are **blocked** and logged as `PINNED-TLS`. (If the site itself is unreachable from the firewall you get a `502` page and an `UPSTREAM-FAIL` event instead: that is a network problem, not pinning, and allowlisting will not help.) Add the host pattern from **Rules & Policies**, or via the API:
 
 ```bash
 curl -X POST http://localhost:8000/allowlist -H "Content-Type: application/json" -d '{"host": "*.whatsapp.net"}'

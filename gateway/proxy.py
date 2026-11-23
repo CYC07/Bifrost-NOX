@@ -84,10 +84,13 @@ class IDPInspector:
         except Exception:
             pass
 
-    async def log_block(self, src_ip, dst_ip, dst_port, host, reason):
-        """Fire-and-forget BLOCK event. Used when MITM cannot complete
-        (e.g. cert pinning on WhatsApp/Snapchat) so the operator sees why
-        the connection died and knows to allowlist the host if intentional."""
+    async def log_block(self, src_ip, dst_ip, dst_port, host, reason, rule="PINNED-TLS", status="block"):
+        """Fire-and-forget event for a connection the proxy could not complete.
+
+        Default: a BLOCK labelled PINNED-TLS, used when the client rejects our certificate (WhatsApp,
+        Snapchat...) so the operator knows to allowlist the host if intentional. UPSTREAM-FAIL events
+        pass status="allow": the origin server was unreachable, the firewall did not block anything,
+        and counting it as a block would inflate the threat numbers."""
         try:
             await self.client.post(
                 MASTER_LOG_URL,
@@ -95,10 +98,10 @@ class IDPInspector:
                     "source_ip": src_ip,
                     "destination_ip": host or dst_ip,
                     "port": str(dst_port),
-                    "status": "block",
-                    "risk_level": "high",
+                    "status": status,
+                    "risk_level": "high" if status == "block" else "safe",
                     "reason": reason,
-                    "rule": "PINNED-TLS",
+                    "rule": rule,
                 },
                 timeout=1.0,
             )

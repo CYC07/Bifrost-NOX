@@ -40,7 +40,7 @@ up)
     ipt filter FORWARD -i "$UPLINK" -o "$LAB_IF" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
     ipt filter INPUT   -i "$LAB_IF" -j ACCEPT
     cd "$REPO"
-    # start_network.sh calls bare python3 -> must be the venv one (zmq/requests)
+    # start_network.sh resolves the venv interpreter itself (absolute path); PATH is kept for the child tools
     env HOTSPOT_IF="$LAB_IF" INTERNET_IF="$UPLINK" PATH="$REPO/venv/bin:$PATH" ./start_network.sh
     echo; echo "UP. VM gateway = ${LAB_IP%/*}; CA cert: http://${LAB_IP%/*}:8000/ca.crt"
     ;;
