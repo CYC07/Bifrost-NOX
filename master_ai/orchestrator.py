@@ -68,38 +68,8 @@ TIME_SERIES: dict[str, deque[float]] = {
 }
 _last_totals = {"total": 0, "blocked": 0}
 
-# Reason → threat classification heuristic (used to populate RECENT_THREATS)
-THREAT_PATTERNS: list[tuple[str, str, str, float]] = [
-    # (substring, type, severity, confidence)
-    ("sql", "SQL Injection", "high", 0.94),
-    ("xss", "Cross-Site Scripting", "high", 0.90),
-    ("prompt_injection", "Prompt Injection", "critical", 0.97),
-    ("prompt injection", "Prompt Injection", "critical", 0.97),
-    ("request_target", "Malicious Request Target", "high", 0.92),
-    ("web_attack", "Web Attack", "high", 0.90),
-    ("code", "Secret Leak", "high", 0.95),        # analyzer module names, as in "Blocked by: code"
-    ("pattern", "PII Exposure", "high", 0.90),
-    ("injection", "Command Injection", "critical", 0.98),
-    ("malware", "Malware Payload", "critical", 0.96),
-    ("eicar", "EICAR Test Signature", "medium", 0.99),
-    ("pii", "PII Exfiltration", "high", 0.92),
-    ("dlp", "Data Loss Prevention", "high", 0.90),
-    ("brute", "Brute Force", "medium", 0.85),
-    ("scan", "Port Scan", "low", 0.72),
-    ("credential", "Credential Stuffing", "high", 0.91),
-    ("phish", "Phishing Attempt", "high", 0.88),
-    ("nsfw", "NSFW Content", "medium", 0.86),
-    ("api key", "API Key Leak", "critical", 0.95),
-    ("api_key", "API Key Leak", "critical", 0.95),
-]
-
-
-def _classify_reason(reason: str) -> tuple[str, str, float]:
-    low = reason.lower()
-    for sub, t, sev, conf in THREAT_PATTERNS:
-        if sub in low:
-            return t, sev, conf
-    return "Anomalous Content", "medium", 0.80
+# Reason → threat classification (shared with the gateway's block page: common/threat_taxonomy.py)
+from common.threat_taxonomy import THREAT_PATTERNS, classify_reason as _classify_reason  # noqa: E402,F401
 
 
 def _status_value(status) -> str:

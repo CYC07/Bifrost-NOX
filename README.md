@@ -223,6 +223,7 @@ All settings are environment variables. `start_all.sh` sources a `.env` in the p
 | `SERVICE_TIMEOUT` | `8.0` | seconds the orchestrator waits for each analysis service (keep below `AI_TIMEOUT`) |
 | `UPSTREAM_CONNECT_TIMEOUT` | `5.0` | seconds the gateway waits per attempt to connect to the real server; on failure the client gets a `502` page and an `UPSTREAM-FAIL` event |
 | `UPSTREAM_CONNECT_RETRIES` | `1` | extra connect attempts after a timeout or transient network error (a refused connection is not retried) |
+| `BLOCK_REVIEW_URL` | unset | `mailto:` or `https:` link behind the block page's "Request a review" button (e.g. your IT Security mailbox). Unset, the button copies the request id, which is also written to `gateway.log` (`Block page served: id=nox-...`) |
 | `BRAIN_TIMEOUT_MS` | `1500` | C++ engine: how long to wait for the AI brain's DNS/FTP verdict before giving up |
 | `BRAIN_COOLDOWN_MS` | `3000` | C++ engine: after the brain fails, skip it this long (no per-packet waiting) and then try again |
 | `BRAIN_FAIL_MODE` | `open` | C++ engine: `open` accepts DNS/FTP packets while the brain is down, `closed` drops them |
