@@ -60,7 +60,7 @@ const OverviewPage = ({ series, threats, countries, kpis, logSamples, liveTick }
         <div>
           <h1>Overview</h1>
           <div className="sub">
-            Real-time posture · <span className="mono">AI Firewall FYP</span>
+            Real-time posture · <span className="mono">Bifrost NØX</span>
           </div>
         </div>
         <div className="toolbar">
