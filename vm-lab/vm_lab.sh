@@ -52,6 +52,9 @@ down)
     ipt_del nat    PREROUTING -i "$LAB_IF" -p tcp --dport 80  -j REDIRECT --to-port 8080
     ipt_del filter FORWARD -i "$LAB_IF" -o "$UPLINK" -p udp --dport 53 -j NFQUEUE --queue-num 1 --queue-bypass
     ipt_del filter FORWARD -i "$LAB_IF" -o "$UPLINK" -p tcp --dport 21 -j NFQUEUE --queue-num 1 --queue-bypass
+    # shellcheck source=../network_inspector/quic_rule.sh
+    source "$REPO/network_inspector/quic_rule.sh"
+    unblock_quic "$LAB_IF"
     ipt_del nat    POSTROUTING -s "$LAB_NET" -o "$UPLINK" -j MASQUERADE
     ipt_del filter FORWARD -i "$LAB_IF" -o "$UPLINK" -j ACCEPT
     ipt_del filter FORWARD -i "$UPLINK" -o "$LAB_IF" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT

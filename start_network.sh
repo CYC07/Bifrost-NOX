@@ -19,6 +19,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_DIR" || exit 1
 # shellcheck source=network_inspector/venv_python.sh
 source "$REPO_DIR/network_inspector/venv_python.sh"
+source "$REPO_DIR/network_inspector/quic_rule.sh"
 
 # Absolute venv interpreter, resolved BEFORE any firewall rule is touched: under sudo a bare python3 is the
 # system one, which has no zmq (the brain died at import and the engine then stalled DNS). To use another
@@ -67,6 +68,11 @@ add_fwd_rule() {
 echo "[2/3] Installing FORWARD NFQUEUE traps ($HOTSPOT_IF -> $INTERNET_IF) on queue $QUEUE_NUM..."
 add_fwd_rule udp 53   # DNS
 add_fwd_rule tcp 21   # FTP
+
+# QUIC (HTTP/3, UDP 443) is not covered by the TCP redirect below: a browser that has learned a site supports HTTP/3
+# would talk to it directly and nothing would be inspected. Refuse it so browsers fall back to TCP (BLOCK_QUIC=0 = off).
+echo "Refusing QUIC (UDP 443) from $HOTSPOT_IF so browsers fall back to inspected TCP..."
+block_quic "$HOTSPOT_IF"
 
 # Transparent proxy redirect for hotspot HTTPS/HTTP -> gateway on 8080.
 # Idempotent: only added if missing.
