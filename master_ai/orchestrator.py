@@ -102,6 +102,14 @@ def _classify_reason(reason: str) -> tuple[str, str, float]:
     return "Anomalous Content", "medium", 0.80
 
 
+def _status_value(status) -> str:
+    """The plain value ("allow" / "block" / "censor") of a VerdictStatus member or an already-plain string.
+
+    str(VerdictStatus.BLOCK) is "VerdictStatus.BLOCK", not "block", so comparing str(status) with the enum never
+    matched: blocks were counted as allowed and logged at level ALLOW."""
+    return str(getattr(status, "value", status)).lower()
+
+
 def _level_for(status: str) -> str:
     s = str(status).lower()
     if s == "block":
@@ -125,8 +133,8 @@ def update_stats(
     byte_count: str = "—",
 ) -> None:
     STATS["total"] += 1
-    status = str(verdict.status)
-    if status == VerdictStatus.BLOCK:
+    status = _status_value(verdict.status)
+    if status == VerdictStatus.BLOCK.value:
         STATS["blocked"] += 1
         STATS["threats"] += 1
     else:
@@ -154,7 +162,7 @@ def update_stats(
     }
     RECENT_LOGS.appendleft(log_entry)
 
-    if status == VerdictStatus.BLOCK:
+    if status == VerdictStatus.BLOCK.value:
         t_type, sev, conf = _classify_reason(verdict.reason)
         threat_id = f"T-{STATS['blocked']:05d}"
         threat_entry = {
