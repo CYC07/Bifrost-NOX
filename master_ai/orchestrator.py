@@ -164,6 +164,17 @@ def _country_guess(ip: str) -> str:
     return buckets[oct1 % len(buckets)]
 
 
+def _image_timeout() -> float:
+    """Image analysis (OCR + object detection + CLIP, queued behind other images during a burst) needs longer than
+    text. IMAGE_SERVICE_TIMEOUT, default 30 s. Keep it below the gateway's AI_TIMEOUT_IMAGE (default 40 s) so the
+    orchestrator gives up, and says why, before the gateway does."""
+    try:
+        value = float(os.environ.get("IMAGE_SERVICE_TIMEOUT", "30.0"))
+    except ValueError:
+        return 30.0
+    return value if value > 0 else 30.0
+
+
 def _service_timeout() -> float:
     """Per-service call timeout. Kept below the gateway's AI_TIMEOUT (10 s) so the
     orchestrator answers (or fails explicitly) before the gateway gives up."""
@@ -249,7 +260,7 @@ async def analyze_traffic(request: Request) -> JSONResponse:
                 blob = await file_item.read()
                 upload_record = _build_upload_record(file_item, blob, "IMG")
                 files = {"file": (file_item.filename, blob, file_item.content_type)}
-                resp = await client.post(f"{IMAGE_SERVICE_URL}/analyze", files=files)
+                resp = await client.post(f"{IMAGE_SERVICE_URL}/analyze", files=files, timeout=_image_timeout())
                 if resp.status_code == 200:
                     verdict = AggregatedVerdict(**resp.json())
                 else:

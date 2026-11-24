@@ -43,6 +43,15 @@ def _doc_max_bytes() -> int:
         return 20 * 1024 * 1024
 
 
+def _timeout_env(name: str, default: float) -> float:
+    """Seconds from the environment; unusable (garbage, zero, negative) -> the default."""
+    try:
+        value = float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
 def _has_field_content(body: bytes) -> bool:
     """True if a multipart body (file parts already removed) still carries field values, i.e.
     something besides boundary lines and part headers."""
@@ -286,7 +295,8 @@ class IDPInspector:
         # verdict arrives (timeout / error / non-200): "open" (default, documented
         # fail-safe design — keep traffic flowing) or "closed" (block it). Fail-open is
         # a bypass whenever analysis is slow, so it is logged loudly either way.
-        timeout = float(os.environ.get("AI_TIMEOUT", "10.0"))
+        # Images wait their turn behind other images during a burst, so they get longer (AI_TIMEOUT_IMAGE).
+        timeout = _timeout_env("AI_TIMEOUT_IMAGE", 40.0) if c_type == "image" else _timeout_env("AI_TIMEOUT", 10.0)
         reason = ""
         try:
             resp = await self.client.post(MASTER_AI_URL, data=data, files=files, timeout=timeout)

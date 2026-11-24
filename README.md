@@ -219,8 +219,10 @@ All settings are environment variables. `start_all.sh` sources a `.env` in the p
 | Variable | Default | Meaning |
 |---|---|---|
 | `AI_FAIL_MODE` | `open` | what to do when no verdict arrives: `open` allows, `closed` blocks (gateway **and** orchestrator) |
-| `AI_TIMEOUT` | `10.0` | seconds the gateway waits for a verdict |
+| `AI_TIMEOUT` | `10.0` | seconds the gateway waits for a text/document verdict |
+| `AI_TIMEOUT_IMAGE` | `40.0` | seconds the gateway waits for an image verdict (images queue behind each other during a burst) |
 | `SERVICE_TIMEOUT` | `8.0` | seconds the orchestrator waits for each analysis service (keep below `AI_TIMEOUT`) |
+| `IMAGE_SERVICE_TIMEOUT` | `30.0` | seconds the orchestrator waits for the image service (keep below `AI_TIMEOUT_IMAGE`) |
 | `UPSTREAM_CONNECT_TIMEOUT` | `5.0` | seconds the gateway waits per attempt to connect to the real server; on failure the client gets a `502` page and an `UPSTREAM-FAIL` event |
 | `UPSTREAM_CONNECT_RETRIES` | `1` | extra connect attempts after a timeout or transient network error (a refused connection is not retried) |
 | `BLOCK_REVIEW_URL` | unset | `mailto:` or `https:` link behind the block page's "Request a review" button (e.g. your IT Security mailbox). Unset, the button copies the request id, which is also written to `gateway.log` (`Block page served: id=nox-...`) |
@@ -241,7 +243,10 @@ All settings are environment variables. `start_all.sh` sources a `.env` in the p
 | `DOC_SCAN_MAX_BYTES` | `20971520` | documents larger than this are allowed unanalysed |
 | `TRUSTED_VERIFY_IP` | `1` | require a trusted-domain connection to land in Microsoft's IP ranges (`0` = name-only) |
 | `SENSITIVE_THRESHOLD` / `SENSITIVE_LABELS` | `0.6` / built-in | zero-shot sensitive-content cutoff / label override |
-| `IMAGE_MAX_CONCURRENCY`, `IMAGE_OCR_MAX_FRAMES`, `IMAGE_CLIP_MULTICROP`, `IMAGE_STEGO_STRICT` | `2`, `8`, off, off | image-service tuning |
+| `IMAGE_MAX_CONCURRENCY` | `2` | images analysed at once by the image service (OCR, object detection, steganography and CLIP together); the rest queue |
+| `IMAGE_CACHE_SIZE` | `512` | image verdicts remembered by SHA-256 of the image (`0` = off) |
+| `IMAGE_MIN_ANALYSIS_BYTES`, `IMAGE_MIN_PIXELS` | `4096`, `4096` | images smaller than either skip the models (icons, trackers) and get the file-safety check only; `0` turns each off |
+| `IMAGE_OCR_MAX_FRAMES`, `IMAGE_CLIP_MULTICROP`, `IMAGE_STEGO_STRICT` | `8`, off, off | image-service tuning |
 | `HOTSPOT_IF` / `INTERNET_IF` | `wlan1` / other wlan | interfaces used by the start/stop scripts |
 | `PROXY_BIND_IP` | auto | override the proxy bind address |
 | `VIRUSTOTAL_API_KEY` | – | enables hash lookups in the document service |

@@ -15,7 +15,9 @@ from transformers import CLIPProcessor, CLIPModel
 from ultralytics import YOLO
 import asyncio
 import dataclasses
+import hashlib
 import json
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -40,9 +42,43 @@ yolo_model = None
 presidio_analyzer = None
 _clip_classifier = None
 
-# Bound concurrent CLIP forwards so N parallel images don't exhaust the
-# laptop's RAM (each forward holds the model + activations).
-_CLIP_SEM = asyncio.Semaphore(int(os.getenv("IMAGE_MAX_CONCURRENCY", "2")))
+def _env_int(name: str, default: int, minimum: int = 0) -> int:
+    """Integer setting from the environment; unusable or below `minimum` -> the default."""
+    try:
+        value = int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+    return value if value >= minimum else default
+
+
+# At most IMAGE_MAX_CONCURRENCY images go through the models at a time; the rest queue. The whole analysis is bounded,
+# not just CLIP: OCR (a Tesseract process per image), object detection and the steganography check used to run for
+# every queued image at once, and a page of 20 thumbnails took 60 s each instead of about 1 s (swap thrash), so most
+# timed out unanalysed and were let through.
+_ANALYSIS_SEM = asyncio.Semaphore(_env_int("IMAGE_MAX_CONCURRENCY", 2, 1))
+
+# Verdicts by SHA-256 of the image bytes (IMAGE_CACHE_SIZE entries, 0 = off): pages repeat thumbnails and icons.
+_VERDICT_CACHE: "OrderedDict[str, dict]" = OrderedDict()
+_INFLIGHT: "dict[str, asyncio.Future]" = {}   # analyses running right now, by image hash
+
+
+def _cache_get(key: str):
+    if _env_int("IMAGE_CACHE_SIZE", 512) <= 0:
+        return None
+    hit = _VERDICT_CACHE.get(key)
+    if hit is not None:
+        _VERDICT_CACHE.move_to_end(key)
+    return hit
+
+
+def _cache_put(key: str, verdict: dict) -> None:
+    size = _env_int("IMAGE_CACHE_SIZE", 512)
+    if size <= 0:
+        return
+    _VERDICT_CACHE[key] = verdict
+    _VERDICT_CACHE.move_to_end(key)
+    while len(_VERDICT_CACHE) > size:
+        _VERDICT_CACHE.popitem(last=False)
 
 
 def _get_clip_classifier():
@@ -140,9 +176,16 @@ async def analyze_image(request: Request):
 
     contents = await file_item.read()
 
+    # Same bytes, same verdict: answer repeats from the cache without touching the models.
+    key = hashlib.sha256(contents).hexdigest()
+    cached = _cache_get(key)
+    if cached is not None:
+        return JSONResponse(cached)
+
     # File-safety runs FIRST, on raw bytes, before any model decode. A polyglot,
     # decompression bomb, or rejected format short-circuits to BLOCK — we never
-    # hand crafted-malicious bytes to the model decoders.
+    # hand crafted-malicious bytes to the model decoders. It is cheap, so it runs for every image,
+    # including the tiny ones that skip the models below.
     r_safety = file_safety.check_bytes(contents)
     if r_safety.blocked:
         verdict = AggregatedVerdict(
@@ -151,25 +194,76 @@ async def analyze_image(request: Request):
             reason="Blocked by: file_safety",
             detailed_findings={"findings": r_safety.findings, "scores": {"file_safety": r_safety.score}},
         )
-        return JSONResponse(dataclasses.asdict(verdict))
+        body = dataclasses.asdict(verdict)
+        _cache_put(key, body)
+        return JSONResponse(body)
 
     try:
         image = Image.open(io.BytesIO(contents))
     except Exception:
         return JSONResponse({"detail": "Invalid image file"}, status_code=400)
 
-    logger.info(f"Analyzing image: {file_item.filename} ({image.width}x{image.height})")
+    # Icons and 1x1 trackers cannot carry readable text or explicit imagery, and CLIP resizes everything to 224 px
+    # anyway: analysing them only delays the real images behind them (most of the timeouts were 1-5 KB files).
+    min_bytes = _env_int("IMAGE_MIN_ANALYSIS_BYTES", 4096)
+    min_pixels = _env_int("IMAGE_MIN_PIXELS", 4096)
+    if len(contents) < min_bytes or image.width * image.height < min_pixels:
+        note = (f"Model analysis skipped: image too small to judge ({len(contents)} bytes, "
+                f"{image.width}x{image.height}); file-safety check only")
+        verdict = AggregatedVerdict(
+            status=VerdictStatus.ALLOW,
+            risk_level=RiskLevel.SAFE,
+            reason="No analyzer flagged a block",
+            detailed_findings={"findings": list(r_safety.findings) + [note], "scores": {"file_safety": r_safety.score}},
+        )
+        body = dataclasses.asdict(verdict)
+        _cache_put(key, body)
+        return JSONResponse(body)
 
-    future_ocr = asyncio.to_thread(model_ocr, image)
-    future_obj = asyncio.to_thread(model_object_detection, image)
-    future_stego = asyncio.to_thread(stego.chi_square_lsb, image.convert("RGB"))
+    # Identical images that arrive together share ONE analysis: the first request does the work, the others wait for
+    # its result (a page asks for the same thumbnail several times at once). If the first one fails, they try themselves.
+    while True:
+        pending = _INFLIGHT.get(key)
+        if pending is None:
+            break
+        shared = await asyncio.shield(pending)
+        if shared is not None:
+            return JSONResponse(shared)
 
-    r_ocr, r_obj, r_stego = await asyncio.gather(future_ocr, future_obj, future_stego)
-    if _clip_classifier is not None:
-        async with _CLIP_SEM:
+    pending = asyncio.get_running_loop().create_future()
+    _INFLIGHT[key] = pending
+    try:
+        body = await _run_models(image, r_safety, file_item.filename, key)
+        pending.set_result(body)
+        return JSONResponse(body)
+    except BaseException:
+        if not pending.done():
+            pending.set_result(None)
+        raise
+    finally:
+        if _INFLIGHT.get(key) is pending:
+            del _INFLIGHT[key]
+
+
+async def _run_models(image, r_safety, filename, key) -> dict:
+    """The expensive part: OCR + object detection + steganography + CLIP, bounded by _ANALYSIS_SEM. Returns the verdict dict."""
+    async with _ANALYSIS_SEM:
+        # An identical image may have been analysed while this one waited its turn.
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
+
+        logger.info(f"Analyzing image: {filename} ({image.width}x{image.height})")
+
+        future_ocr = asyncio.to_thread(model_ocr, image)
+        future_obj = asyncio.to_thread(model_object_detection, image)
+        future_stego = asyncio.to_thread(stego.chi_square_lsb, image.convert("RGB"))
+
+        r_ocr, r_obj, r_stego = await asyncio.gather(future_ocr, future_obj, future_stego)
+        if _clip_classifier is not None:
             r_clip = await asyncio.to_thread(_clip_classifier.classify, image.convert("RGB"))
-    else:
-        r_clip = AnalysisResult(module="semantic_clip", score=0.0, findings=["Model not loaded"])
+        else:
+            r_clip = AnalysisResult(module="semantic_clip", score=0.0, findings=["Model not loaded"])
 
     # Sensitive-visual + real-secret/PII cross-check: a DLP-relevant visual
     # (source code, financial sheet, phishing page) is advisory alone, but when
@@ -219,7 +313,11 @@ async def analyze_image(request: Request):
         detailed_findings={"findings": findings, "scores": detailed_scores},
     )
 
-    return JSONResponse(dataclasses.asdict(verdict))
+    body = dataclasses.asdict(verdict)
+    # A model that was not loaded gave a placeholder result, not a real one: do not remember that verdict.
+    if _clip_classifier is not None:
+        _cache_put(key, body)
+    return body
 
 routes = [
     Route("/analyze", analyze_image, methods=["POST"]),
