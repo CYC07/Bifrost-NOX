@@ -7,6 +7,7 @@ import os
 import asyncio
 import httpx
 from mitm_engine import TransparentProxy
+from block_page import BlockVerdict
 
 # Ensure we can import from common
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -130,7 +131,7 @@ class IDPInspector:
             if tool:
                 if scanner_policy() == "block":
                     logger.warning(f"BLOCK: scanner tool '{tool}' ({src_ip} -> {dst_ip}:{dst_port} {method} {host}).")
-                    return "block"
+                    return BlockVerdict(f"scanner tool '{tool}'", category="Scanner Tool", detector="scanner-ua")
                 logger.warning(f"ADVISORY: scanner tool '{tool}' ({src_ip} -> {dst_ip}:{dst_port} {method} {host}).")
 
         # Scanner BEHAVIOUR (works even when the User-Agent is spoofed): a client whose requests to one host mostly
@@ -146,7 +147,8 @@ class IDPInspector:
                 if why:
                     if scanner_behaviour_policy() == "block":
                         logger.warning(f"BLOCK: scanner behaviour ({src_ip} -> {site}): {why}.")
-                        return "block"
+                        return BlockVerdict(f"scanner behaviour: {why}", category="Scanner Behaviour",
+                                            detector="scanner-behaviour")
                     logger.warning(f"ADVISORY: scanner behaviour ({src_ip} -> {site}): {why}.")
                 self.scanner_tracker.observe_request(src_ip, site, path)
 
@@ -159,7 +161,7 @@ class IDPInspector:
                                        host=host, method=method, path=path, kind="url")
             if tv.get("status") == "block":
                 logger.warning(f"BLOCK AI target ({src_ip} -> {dst_ip}): {tv.get('reason')}")
-                return "block"
+                return BlockVerdict(tv.get("reason") or "")
 
         if not body: return "allow"
 
@@ -177,12 +179,12 @@ class IDPInspector:
         # 1. SECURITY: Executable
         if detected_type == "executable":
             logger.warning(f"BLOCK: Executable detected ({src_ip} -> {dst_ip}).")
-            return "block"
+            return BlockVerdict("Executable detected", category="Executable File", detector="file-type check")
 
         # 1a. SECURITY: legacy Office binary (.doc/.xls/.ppt) - blocked outright (LEGACY_OFFICE_POLICY).
         if detected_type == "legacy_office" and _legacy_office_policy() == "block":
             logger.warning(f"BLOCK: Legacy Office binary (OLE2 .doc/.xls/.ppt) ({src_ip} -> {dst_ip}).")
-            return "block"
+            return BlockVerdict("Legacy Office binary", category="Legacy Office File", detector="file-type check")
 
         # 1b. Uploaded files inside multipart/form-data: the whole body sniffs as text, so each file
         # part is sniffed and routed on its own (document -> document service, image -> image
@@ -192,7 +194,7 @@ class IDPInspector:
             verdict, remaining = await self._inspect_upload_parts(headers, body, direction, src_ip, dst_ip,
                                                                   dst_port, host, method, path)
             if verdict == "block":
-                return "block"
+                return verdict
             if remaining is not None:
                 if not _has_field_content(remaining):
                     return "allow"
@@ -203,7 +205,7 @@ class IDPInspector:
         # 2. SECURITY: High Entropy Text
         if detected_type == "text" and entropy > 7.5:
             logger.warning(f"BLOCK: High entropy text ({src_ip} -> {dst_ip}).")
-            return "block"
+            return BlockVerdict("High-entropy text", category="High-Entropy Content", detector="entropy check")
 
         # 3. AI Analysis
         if detected_type == "document":
@@ -224,7 +226,7 @@ class IDPInspector:
                                         host=host, method=method, path=path)
         if verdict.get("status") == "block":
             logger.warning(f"BLOCK AI ({src_ip} -> {dst_ip}): {verdict.get('reason')}")
-            return "block"
+            return BlockVerdict(verdict.get("reason") or "")
 
         return "allow"
 
@@ -242,7 +244,8 @@ class IDPInspector:
                 kind = FileSniffer.get_true_file_type(part.data)
                 if kind == "legacy_office" and _legacy_office_policy() == "block":
                     logger.warning(f"BLOCK: uploaded legacy Office binary {part.filename!r} ({src_ip} -> {dst_ip}).")
-                    return "block", None
+                    return (BlockVerdict("Uploaded legacy Office binary", category="Legacy Office File",
+                                         detector="file-type check"), None)
                 if kind not in ("document", "image") or _doc_scan_mode() == "off":
                     continue
                 logger.info(f"Inspecting uploaded {kind} part {part.filename!r} ({len(part.data)} bytes)")
@@ -250,7 +253,7 @@ class IDPInspector:
                                           host=host, method=method, path=path)
                 if v.get("status") == "block":
                     logger.warning(f"BLOCK AI upload part ({src_ip} -> {dst_ip}): {v.get('reason')}")
-                    return "block", None
+                    return BlockVerdict(v.get("reason") or ""), None
                 remaining = (body if remaining is None else remaining).replace(part.data, b"", 1)
         except Exception as exc:
             logger.warning(f"Upload part inspection failed open: {type(exc).__name__}: {exc}")

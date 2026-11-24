@@ -7,6 +7,7 @@ import ssl
 import sys
 import logging
 from cert_utils import CertificateAuthority, is_valid_cert_host
+from block_page import BlockInfo, render_block_response
 from http_parser import HTTPParser
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -466,21 +467,16 @@ class TransparentProxy:
     # inspect and stream the rest raw (large downloads, non-HTTP tunnels, etc.).
     MAX_INSPECT_BYTES = 10 * 1024 * 1024
 
-    def _block_response(self) -> bytes:
-        html = (
-            b"<html><head><meta charset='utf-8'><title>Blocked</title></head>"
-            b"<body style='font-family:sans-serif;background:#0b0f14;color:#e6edf3;"
-            b"text-align:center;padding-top:12vh'>"
-            b"<h1 style='color:#ff5c5c'>Blocked by Bifrost N\xc3\x98X</h1>"
-            b"<p>This content was flagged by the AI firewall and was not delivered.</p>"
-            b"</body></html>"
-        )
-        return (
-            b"HTTP/1.1 403 Forbidden\r\n"
-            b"Content-Type: text/html; charset=utf-8\r\n"
-            b"Content-Length: " + str(len(html)).encode() + b"\r\n"
-            b"Connection: close\r\n\r\n" + html
-        )
+    def _block_response(self, verdict=None, *, host="", direction="outbound", client_ip="", is_https=False) -> bytes:
+        """The brand-kit block page (gateway/block_page.py). With no verdict it is the generic page. The request id
+        on the page is logged here so IT can find the block from the id a user quotes."""
+        if verdict is None:
+            return render_block_response(None)
+        info = BlockInfo.from_verdict(verdict, host=host, direction=direction, client_ip=client_ip,
+                                      is_https=is_https)
+        logger.warning(f"Block page served: id={info.request_id} host={info.host} client={client_ip} "
+                       f"direction={direction} category={info.category} reason={info.reason[:200]!r}")
+        return render_block_response(info)
 
     async def pipe(self, client_r, client_w, server_r, server_w, is_https,
                    client_ip="unknown", server_name="unknown", dest_ip="unknown", dest_port=""):
@@ -506,7 +502,8 @@ class TransparentProxy:
             if verdict == "block":
                 # Always inform the client, whichever direction tripped.
                 try:
-                    client_w.write(self._block_response())
+                    client_w.write(self._block_response(verdict, host=real_dst, direction=direction,
+                                                        client_ip=client_ip, is_https=is_https))
                     await client_w.drain()
                 except Exception:
                     pass
