@@ -68,3 +68,49 @@ def test_orchestrator_serves_the_symbols(name, monkeypatch):
     r = TestClient(orch.app, client=("127.0.0.1", 50000)).get(f"/dashboard/assets/{name}")
     assert r.status_code == 200 and r.headers["content-type"].startswith("image/svg+xml")
     assert b"<svg" in r.content
+
+
+# ---------------------------------------------------------------- wordmark next to the symbol
+
+W_INK = "bifrost-nox-wordmark-ink.svg"
+W_PAPER = "bifrost-nox-wordmark-paper.svg"
+APP = open(os.path.join(DASH, "app.jsx"), encoding="utf-8").read()
+
+
+@pytest.mark.parametrize("name,fill", [(W_INK, "#1A1714"), (W_PAPER, "#FAF8F4")])
+def test_wordmark_files_are_present_valid_and_safe(name, fill):
+    raw = open(os.path.join(DASH, "assets", name), encoding="utf-8").read()
+    assert ET.fromstring(raw).tag.endswith("svg") and f'fill="{fill}"' in raw
+    low = raw.lower()
+    assert "<script" not in low and "onload" not in low and "href=\"http" not in low
+
+
+def test_wordmark_is_ink_on_light_and_paper_on_dark():
+    assert W_INK in _rule(".brand-name") and W_PAPER not in _rule(".brand-name")
+    dark = _rule('[data-theme="dark"] .brand-name')
+    assert W_PAPER in dark and W_INK not in dark
+
+
+def test_wordmark_keeps_its_proportions_and_fits_the_sidebar():
+    base = _rule(".brand-name")
+    assert re.search(r"background[^;]*contain", base) and "no-repeat" in base and "flex-shrink: 0" in base
+    w = float(re.search(r"width:\s*([\d.]+)px", base).group(1))
+    h = float(re.search(r"height:\s*([\d.]+)px", base).group(1))
+    assert abs(w / h - 721.77 / 80.06) < 0.15              # the file's own aspect ratio (no stretching)
+    assert 26 + 10 + w >= 120                                # kit minimum for symbol + wordmark: 120 px
+    assert w <= 112                                          # fits the 232 px sidebar next to the symbol and the FYP badge
+
+
+def test_brand_text_is_replaced_by_the_wordmark_in_both_layouts_and_stays_accessible():
+    assert '<div className="brand-name">AI Firewall</div>' not in APP
+    assert APP.count('className="brand-name"') == 2                       # sidebar + top bar
+    assert APP.count('role="img" aria-label="Bifrost NØX"') == 2          # a screen reader still hears the name
+
+
+@pytest.mark.parametrize("name", [W_INK, W_PAPER])
+def test_orchestrator_serves_the_wordmarks(name, monkeypatch):
+    monkeypatch.chdir(ROOT)
+    sys.path.insert(0, ROOT)
+    from master_ai import orchestrator as orch
+    r = TestClient(orch.app, client=("127.0.0.1", 50000)).get(f"/dashboard/assets/{name}")
+    assert r.status_code == 200 and r.headers["content-type"].startswith("image/svg+xml")

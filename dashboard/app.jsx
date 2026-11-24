@@ -135,7 +135,7 @@ const App = () => {
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark"/>
-          <div className="brand-name">AI Firewall</div>
+          <div className="brand-name" role="img" aria-label="Bifrost NØX"/>
           <div className="brand-env">FYP</div>
         </div>
         <div className="nav-section">
@@ -165,7 +165,7 @@ const App = () => {
       <div className="topbar-alt">
         <div className="brand">
           <div className="brand-mark"/>
-          <div className="brand-name">AI Firewall</div>
+          <div className="brand-name" role="img" aria-label="Bifrost NØX"/>
           <div className="brand-env">FYP</div>
         </div>
         <div className="tnav">
