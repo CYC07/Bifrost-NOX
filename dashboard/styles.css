@@ -181,10 +181,14 @@ input, select, textarea { font-family: inherit; color: inherit; }
 [data-theme="dark"] .brand-mark {
   background-image: url("assets/bifrost-nox-symbol-small-paper.svg");
 }
+/* Bifrost NØX wordmark (drawn outlines, 721.77 x 80.06 viewBox): ink on the light theme, paper on the dark theme. */
 .brand-name {
-  font-weight: 700;
-  letter-spacing: -0.01em;
-  font-size: 15px;
+  width: 108px; height: 12px;
+  background: url("assets/bifrost-nox-wordmark-ink.svg") left center / contain no-repeat;
+  flex-shrink: 0;
+}
+[data-theme="dark"] .brand-name {
+  background-image: url("assets/bifrost-nox-wordmark-paper.svg");
 }
 .brand-env {
   font-family: var(--font-mono);
