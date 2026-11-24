@@ -98,7 +98,7 @@ def test_wordmark_keeps_its_proportions_and_fits_the_sidebar():
     h = float(re.search(r"height:\s*([\d.]+)px", base).group(1))
     assert abs(w / h - 721.77 / 80.06) < 0.15              # the file's own aspect ratio (no stretching)
     assert 26 + 10 + w >= 120                                # kit minimum for symbol + wordmark: 120 px
-    assert w <= 112                                          # fits the 232 px sidebar next to the symbol and the FYP badge
+    assert w <= 156                                          # 232 px sidebar - 2x20 padding - 26 symbol - 10 gap
 
 
 def test_brand_text_is_replaced_by_the_wordmark_in_both_layouts_and_stays_accessible():
@@ -114,3 +114,39 @@ def test_orchestrator_serves_the_wordmarks(name, monkeypatch):
     from master_ai import orchestrator as orch
     r = TestClient(orch.app, client=("127.0.0.1", 50000)).get(f"/dashboard/assets/{name}")
     assert r.status_code == 200 and r.headers["content-type"].startswith("image/svg+xml")
+
+
+# ---------------------------------------------------------------- the name is Bifrost NØX everywhere the user can see it
+
+OVERVIEW = open(os.path.join(DASH, "page_overview.jsx"), encoding="utf-8").read()
+INDEX = open(os.path.join(DASH, "index.html"), encoding="utf-8").read()
+RAW_CSS = open(os.path.join(DASH, "styles.css"), encoding="utf-8").read()
+VISIBLE = {"app.jsx": APP, "page_overview.jsx": OVERVIEW, "index.html": INDEX,
+           "page_core.jsx": open(os.path.join(DASH, "page_core.jsx"), encoding="utf-8").read(),
+           "page_uploads.jsx": open(os.path.join(DASH, "page_uploads.jsx"), encoding="utf-8").read(),
+           "components.jsx": open(os.path.join(DASH, "components.jsx"), encoding="utf-8").read()}
+
+
+def test_the_fyp_badge_is_gone_from_the_brand_area():
+    assert "brand-env" not in APP and "brand-env" not in RAW_CSS      # markup and the now-dead CSS rule
+    for name, text in VISIBLE.items():
+        assert "FYP" not in text, f"'FYP' still shown in {name}"
+
+
+def test_breadcrumb_root_is_the_product_name():
+    m = re.search(r'<div className="crumbs">\s*<span>([^<]+)</span>', APP)
+    assert m and m.group(1) == "Bifrost NØX"
+
+
+def test_overview_subtitle_uses_the_product_name():
+    sub = re.search(r'<div className="sub">(.*?)</div>', OVERVIEW, re.S).group(1)
+    assert "Bifrost NØX" in sub and "AI Firewall" not in sub
+
+
+def test_page_title_is_the_product_name():
+    assert re.search(r"<title>Bifrost NØX — Dashboard</title>", INDEX)
+
+
+def test_no_visible_text_still_says_ai_firewall():
+    for name, text in VISIBLE.items():
+        assert "AI Firewall" not in text, f"'AI Firewall' still present in {name}"

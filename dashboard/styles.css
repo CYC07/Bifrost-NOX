@@ -190,17 +190,6 @@ input, select, textarea { font-family: inherit; color: inherit; }
 [data-theme="dark"] .brand-name {
   background-image: url("assets/bifrost-nox-wordmark-paper.svg");
 }
-.brand-env {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  letter-spacing: 0.04em;
-  color: var(--ink-3);
-  padding: 2px 6px;
-  background: var(--bg-sunken);
-  border-radius: 4px;
-  border: 1px solid var(--border);
-  margin-left: auto;
-}
 
 .nav-section {
   padding: var(--space-4) var(--space-3);
