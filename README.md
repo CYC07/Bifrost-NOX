@@ -223,6 +223,7 @@ All settings are environment variables. `start_all.sh` sources a `.env` in the p
 | `AI_TIMEOUT_IMAGE` | `40.0` | seconds the gateway waits for an image verdict (images queue behind each other during a burst) |
 | `SERVICE_TIMEOUT` | `8.0` | seconds the orchestrator waits for each analysis service (keep below `AI_TIMEOUT`) |
 | `IMAGE_SERVICE_TIMEOUT` | `30.0` | seconds the orchestrator waits for the image service (keep below `AI_TIMEOUT_IMAGE`) |
+| `BLOCK_QUIC` | `1` | `start_network.sh` refuses UDP 443 from clients so browsers fall back from QUIC/HTTP/3 to TCP, which the firewall inspects. Without it, a browser that has learned a site supports HTTP/3 (Google does) bypasses inspection entirely. `0` = off |
 | `UPSTREAM_CONNECT_TIMEOUT` | `5.0` | seconds the gateway waits per attempt to connect to the real server; on failure the client gets a `502` page and an `UPSTREAM-FAIL` event |
 | `UPSTREAM_CONNECT_RETRIES` | `1` | extra connect attempts after a timeout or transient network error (a refused connection is not retried) |
 | `BLOCK_REVIEW_URL` | unset | `mailto:` or `https:` link behind the block page's "Request a review" button (e.g. your IT Security mailbox). Unset, the button copies the request id, which is also written to `gateway.log` (`Block page served: id=nox-...`) |

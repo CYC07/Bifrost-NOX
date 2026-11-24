@@ -102,6 +102,10 @@ del_rule FORWARD -i "$HOTSPOT_IF" -o "$INTERNET_IF" -p udp --dport 53 \
 del_rule FORWARD -i "$HOTSPOT_IF" -o "$INTERNET_IF" -p tcp --dport 21 \
     -j NFQUEUE --queue-num "$QUEUE_NUM" --queue-bypass
 
+# QUIC (UDP 443) refusal installed by start_network.sh.
+source "$(dirname "${BASH_SOURCE[0]}")/network_inspector/quic_rule.sh"
+unblock_quic "$HOTSPOT_IF"
+
 # Legacy INPUT/OUTPUT NFQUEUE rules from earlier versions of start_network.sh.
 del_rule INPUT  -p udp --dport 53 -j NFQUEUE --queue-num "$QUEUE_NUM"
 del_rule OUTPUT -p udp --dport 53 -j NFQUEUE --queue-num "$QUEUE_NUM"
