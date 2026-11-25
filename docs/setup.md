@@ -94,6 +94,8 @@ source venv/bin/activate
 
 ### Gateway + AI services only (no hotspot)
 
+`./start_services.sh` starts all of the below with the virtualenv's Python and skips anything already running. By hand:
+
 ```bash
 source venv/bin/activate
 export PYTHONPATH=.

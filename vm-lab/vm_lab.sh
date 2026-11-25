@@ -5,7 +5,7 @@
 # Prereq: uvicorn services (:8000-8003) and gateway/proxy.py (:8080) already running.
 set -eu
 
-REPO="${REPO:-/home/pentest/FYP/ai_firewall}"
+REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"   # the checkout this script lives in
 LAB_IF="${LAB_IF:-vboxnet0}"
 LAB_NET="${LAB_NET:-192.168.56.0/24}"
 LAB_IP="${LAB_IP:-192.168.56.1/24}"
