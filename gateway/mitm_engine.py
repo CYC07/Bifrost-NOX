@@ -1,11 +1,13 @@
 import asyncio
+import html
 import os
 import socket
 import struct
 import ssl
 import sys
 import logging
-from cert_utils import CertificateAuthority
+from cert_utils import CertificateAuthority, is_valid_cert_host
+from block_page import BlockInfo, render_block_response
 from http_parser import HTTPParser
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -15,6 +17,61 @@ from common.trusted_domains import is_trusted_connection  # noqa: E402
 logger = logging.getLogger("mitm_engine")
 SO_ORIGINAL_DST = 80
 
+DEFAULT_UPSTREAM_CONNECT_TIMEOUT = 5.0   # seconds per attempt; the OS default is ~2 minutes
+DEFAULT_UPSTREAM_CONNECT_RETRIES = 1     # one retry after a timeout / transient error
+
+
+def _upstream_timeout() -> float:
+    """UPSTREAM_CONNECT_TIMEOUT (seconds per connect attempt); falls back to 5 s on anything unusable."""
+    try:
+        value = float(os.environ.get("UPSTREAM_CONNECT_TIMEOUT", DEFAULT_UPSTREAM_CONNECT_TIMEOUT))
+    except ValueError:
+        return DEFAULT_UPSTREAM_CONNECT_TIMEOUT
+    return value if value > 0 else DEFAULT_UPSTREAM_CONNECT_TIMEOUT
+
+
+def _upstream_retries() -> int:
+    """UPSTREAM_CONNECT_RETRIES (extra attempts after the first); never negative."""
+    try:
+        return max(0, int(os.environ.get("UPSTREAM_CONNECT_RETRIES", DEFAULT_UPSTREAM_CONNECT_RETRIES)))
+    except ValueError:
+        return DEFAULT_UPSTREAM_CONNECT_RETRIES
+
+
+DEFAULT_TLS_HANDSHAKE_TIMEOUT = 10.0     # seconds a client gets to finish the TLS handshake with our certificate
+REPLY_DRAIN_TIMEOUT = 0.5                # seconds to read the client's request before closing after a 502
+
+
+class CertError(Exception):
+    """We could not produce a certificate for the client (disk, CA...). Our fault, not the client rejecting
+    anything, so it must not be reported as cert pinning."""
+
+
+class UpstreamError(Exception):
+    """The origin server could not be reached. Distinct from the CLIENT refusing our certificate
+    (cert pinning): the two need different operator action and must not share a label."""
+
+
+def _bad_gateway_response(host: str, detail: str) -> bytes:
+    """HTTP 502 the browser can display. `host` and `detail` can carry attacker-influenced text
+    (SNI, Host), so they are escaped."""
+    body = (
+        "<html><head><meta charset='utf-8'><title>Upstream unreachable</title></head>"
+        "<body style='font-family:sans-serif;background:#0b0f14;color:#e6edf3;"
+        "text-align:center;padding-top:12vh'>"
+        "<h1 style='color:#f5b400'>Bifrost NØX could not reach the site</h1>"
+        f"<p>Bifrost NØX could not reach <b>{html.escape(host or 'the server')}</b>. "
+        "This is a connection problem between the firewall and that server; "
+        "nothing was blocked by policy.</p>"
+        f"<p style='color:#8b98a5;font-size:.9em'>{html.escape(detail)}</p>"
+        "</body></html>"
+    ).encode("utf-8")
+    return (
+        b"HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/html; charset=utf-8\r\n"
+        b"Content-Length: " + str(len(body)).encode() + b"\r\nConnection: close\r\n\r\n" + body
+    )
+
+
 class TransparentProxy:
     def __init__(self, host='0.0.0.0', port=8080, inspector=None):
         self.host = host
@@ -22,6 +79,37 @@ class TransparentProxy:
         self.inspector = inspector
         self.ca = CertificateAuthority()
         self.loop = None  # set in start(): no running loop exists yet at __init__ time
+        self.upstream_connect_timeout = _upstream_timeout()
+        self.tls_handshake_timeout = DEFAULT_TLS_HANDSHAKE_TIMEOUT
+        self._bg_tasks = set()   # fire-and-forget event logs; kept referenced until done
+
+    async def _open_upstream(self, dest_ip, dest_port, ssl_ctx=None, server_hostname=None):
+        """Connect to the real server with a bounded wait and one retry.
+
+        Without this a SYN that is never answered held the client's connection open for the OS connect
+        timeout (about two minutes) and ended in a silent close. A refused connection or a TLS
+        handshake failure is a definite answer, so only timeouts and transient network errors retry."""
+        attempts = 1 + _upstream_retries()
+        timeout = self.upstream_connect_timeout
+        last = "no attempt made"
+        kwargs = {} if ssl_ctx is None else {"ssl": ssl_ctx, "server_hostname": server_hostname}
+        for _ in range(attempts):
+            try:
+                return await asyncio.wait_for(asyncio.open_connection(dest_ip, dest_port, **kwargs), timeout)
+            except ConnectionRefusedError as exc:
+                raise UpstreamError(f"{dest_ip}:{dest_port} refused the connection") from exc
+            except ssl.SSLError as exc:
+                raise UpstreamError(
+                    f"TLS handshake with {dest_ip}:{dest_port} failed ({exc.__class__.__name__})") from exc
+            except (ValueError, TypeError, UnicodeError) as exc:
+                # A server name the ssl module cannot encode (it comes from the client's SNI)
+                raise UpstreamError(f"cannot connect to {dest_ip}:{dest_port}: unusable server name "
+                                    f"({exc.__class__.__name__})") from exc
+            except asyncio.TimeoutError:
+                last = f"timed out after {timeout:g}s"
+            except OSError as exc:
+                last = exc.strerror or exc.__class__.__name__
+        raise UpstreamError(f"{dest_ip}:{dest_port} {last} ({attempts} attempt{'s' if attempts != 1 else ''})")
 
     async def start(self):
         self.loop = asyncio.get_running_loop()
@@ -156,8 +244,12 @@ class TransparentProxy:
             if peek_data and peek_data[0] == 0x16:
                 is_tls = True
                 sni = self.extract_sni(peek_data)
-                if sni:
+                if sni and is_valid_cert_host(sni):
                     server_name = sni
+                elif sni:
+                    # Not a plain hostname (path separators, NUL, over-long labels...). It would reach a
+                    # certificate file name and the upstream TLS server_hostname, so treat it as no SNI.
+                    logger.warning(f"Ignoring unusable SNI {sni[:80]!r} from {client_writer.get_extra_info('peername')}")
             elif dest_port == 443:
                 # Port 443 with no handshake yet — still treat as TLS
                 is_tls = True
@@ -205,9 +297,11 @@ class TransparentProxy:
         their handshake end-to-end, as if the proxy were a transparent router.
         """
         try:
-            server_reader, server_writer = await asyncio.open_connection(dest_ip, dest_port)
-        except Exception as exc:
+            server_reader, server_writer = await self._open_upstream(dest_ip, dest_port)
+        except UpstreamError as exc:
+            # The client's TLS has not started, so there is no way to show it a page: log and close.
             logger.error(f"Tunnel {server_name} -> {dest_ip}:{dest_port} failed: {exc}")
+            self._log_upstream_fail_bg(client_ip, dest_ip, dest_port, server_name, exc)
             try: client_writer.close()
             except: pass
             return
@@ -233,14 +327,56 @@ class TransparentProxy:
 
     async def handle_http(self, client_reader, client_writer, dest_ip, dest_port, server_name, client_ip):
         try:
-            server_reader, server_writer = await asyncio.open_connection(dest_ip, dest_port)
-        except Exception as e:
-            logger.error(f"Upstream HTTP error: {e}")
-            client_writer.close()
+            server_reader, server_writer = await self._open_upstream(dest_ip, dest_port)
+        except UpstreamError as exc:
+            logger.error(f"Upstream HTTP error: {exc}")
+            self._log_upstream_fail_bg(client_ip, dest_ip, dest_port, server_name, exc)
+            await self._reply_502(client_writer, server_name, exc, client_reader)
             return
         await self.pipe(client_reader, client_writer, server_reader, server_writer,
                         is_https=False, client_ip=client_ip, server_name=server_name,
                         dest_ip=dest_ip, dest_port=dest_port)
+
+    async def _reply_502(self, writer, host, exc, reader=None):
+        """Tell the client what happened instead of closing in silence (browsers show ERR_EMPTY_RESPONSE).
+
+        The client's request is read (briefly) before closing: closing with unread data makes the kernel
+        send a RST, and some clients then throw the 502 away and report a connection reset."""
+        try:
+            writer.write(_bad_gateway_response(host, str(exc)))
+            await writer.drain()
+            if reader is not None:
+                try:
+                    await asyncio.wait_for(reader.read(65536), REPLY_DRAIN_TIMEOUT)
+                except Exception:  # noqa: BLE001 - timeout / reset: nothing more to learn
+                    pass
+        except Exception:  # noqa: BLE001 - the client may already be gone
+            pass
+        finally:
+            try: writer.close()
+            except Exception: pass  # noqa: BLE001
+
+    async def _upgrade_client(self, client_writer, server_name):
+        """Complete the TLS handshake with the client using a certificate for `server_name` signed by our
+        CA. Returns the (reader, writer) pair on the decrypted stream. Raises if the client refuses."""
+        loop = self.loop or asyncio.get_running_loop()
+        try:
+            cert_path, key_path = self.ca.get_certificate_for_host(server_name)
+            ssl_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+            ssl_ctx.load_cert_chain(cert_path, key_path)
+            ssl_ctx.set_alpn_protocols(["http/1.1"])
+        except (OSError, ValueError, ssl.SSLError) as exc:
+            raise CertError(f"cannot prepare a certificate for {server_name!r}: {exc}") from exc
+
+        transport = client_writer.transport
+        new_transport = await loop.start_tls(transport, transport.get_protocol(), ssl_ctx, server_side=True,
+                                             ssl_handshake_timeout=self.tls_handshake_timeout)
+
+        reader_ssl = asyncio.StreamReader()
+        protocol_ssl = asyncio.StreamReaderProtocol(reader_ssl)
+        new_transport.set_protocol(protocol_ssl)
+        writer_ssl = asyncio.StreamWriter(new_transport, protocol_ssl, reader_ssl, loop)
+        return reader_ssl, writer_ssl
 
     async def handle_https(self, client_reader, client_writer, dest_ip, dest_port, server_name, client_ip):
         try:
@@ -251,40 +387,57 @@ class TransparentProxy:
             # without it they RST during handshake. Advertise http/1.1 only;
             # advertising h2 would require HTTP/2 framing support in the pipe.
             server_ctx.set_alpn_protocols(["http/1.1"])
-            server_reader, server_writer = await asyncio.open_connection(dest_ip, dest_port, ssl=server_ctx, server_hostname=server_name)
-        except Exception as exc:
+            server_reader, server_writer = await self._open_upstream(dest_ip, dest_port, server_ctx, server_name)
+        except UpstreamError as exc:
+            # Not pinning: the origin never answered (or refused). Say so, and tell the client.
             logger.warning(f"Upstream TLS to {server_name} failed: {exc}")
-            await self._log_pinned_block(client_ip, dest_ip, dest_port, server_name, f"Upstream TLS rejected ({exc.__class__.__name__})")
-            client_writer.close()
+            self._log_upstream_fail_bg(client_ip, dest_ip, dest_port, server_name, exc)
+            await self._reply_502_tls(client_writer, server_name, exc)
             return
 
         try:
-            cert_path, key_path = self.ca.get_certificate_for_host(server_name)
-            ssl_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-            ssl_ctx.load_cert_chain(cert_path, key_path)
-            ssl_ctx.set_alpn_protocols(["http/1.1"])
-
-            transport = client_writer.transport
-            new_transport = await self.loop.start_tls(transport, transport.get_protocol(), ssl_ctx, server_side=True)
-
-            reader_ssl = asyncio.StreamReader()
-            protocol_ssl = asyncio.StreamReaderProtocol(reader_ssl)
-            new_transport.set_protocol(protocol_ssl)
-            writer_ssl = asyncio.StreamWriter(new_transport, protocol_ssl, reader_ssl, self.loop)
-
-            await self.pipe(reader_ssl, writer_ssl, server_reader, server_writer,
-                            is_https=True, client_ip=client_ip, server_name=server_name,
-                            dest_ip=dest_ip, dest_port=dest_port)
+            reader_ssl, writer_ssl = await self._upgrade_client(client_writer, server_name)
+        except CertError as e:
+            # Our own fault (disk, CA): not the client rejecting anything, so no PINNED-TLS event.
+            logger.error(f"{e}")
+            try: client_writer.close()
+            except: pass
+            try: server_writer.close()
+            except: pass
+            return
         except Exception as e:
-            # Most common cause: the client pinned the upstream cert and rejected
-            # our locally-signed fake one. Surface this as a BLOCK so the operator
-            # sees it on the dashboard and can add the host to the allowlist.
+            # The client would not complete the handshake with our certificate: typically cert pinning.
+            # Surface it as a BLOCK so the operator sees it and can add the host to the allowlist.
             logger.warning(f"TLS upgrade to client failed for {server_name}: {e}")
             await self._log_pinned_block(client_ip, dest_ip, dest_port, server_name, f"Client rejected MITM cert ({e.__class__.__name__}) — add host to allowlist to bypass")
             try: client_writer.close()
             except: pass
             try: server_writer.close()
             except: pass
+            return
+
+        try:
+            await self.pipe(reader_ssl, writer_ssl, server_reader, server_writer,
+                            is_https=True, client_ip=client_ip, server_name=server_name,
+                            dest_ip=dest_ip, dest_port=dest_port)
+        except Exception as e:
+            # The handshake succeeded, so this is not pinning (it used to be reported as such).
+            logger.warning(f"Inspection pipe for {server_name} failed: {e!r}")
+            try: writer_ssl.close()
+            except: pass
+            try: server_writer.close()
+            except: pass
+
+    async def _reply_502_tls(self, client_writer, server_name, exc):
+        """502 for an https request whose origin is unreachable. The client's TLS has not started yet,
+        so complete it with our certificate first; a client that does not trust the CA just gets a close."""
+        try:
+            reader_ssl, writer_ssl = await self._upgrade_client(client_writer, server_name)
+        except Exception:  # noqa: BLE001 - e.g. the client does not trust our CA, or never handshakes
+            try: client_writer.close()
+            except Exception: pass  # noqa: BLE001
+            return
+        await self._reply_502(writer_ssl, server_name, exc, reader_ssl)
 
     async def _log_pinned_block(self, client_ip, dest_ip, dest_port, server_name, reason):
         if not (self.inspector and hasattr(self.inspector, "log_block")):
@@ -294,25 +447,36 @@ class TransparentProxy:
         except Exception:
             pass
 
+    def _log_upstream_fail_bg(self, client_ip, dest_ip, dest_port, server_name, exc):
+        """Report the failure without making the client wait for the orchestrator (its POST can take 1 s)."""
+        task = asyncio.ensure_future(self._log_upstream_fail(client_ip, dest_ip, dest_port, server_name, exc))
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
+    async def _log_upstream_fail(self, client_ip, dest_ip, dest_port, server_name, exc):
+        """Dashboard event for an origin we could not reach. status=allow: the firewall blocked nothing."""
+        if not (self.inspector and hasattr(self.inspector, "log_block")):
+            return
+        try:
+            await self.inspector.log_block(client_ip, dest_ip, dest_port, server_name,
+                                           f"Upstream unreachable: {exc}", rule="UPSTREAM-FAIL", status="allow")
+        except Exception:
+            pass
+
     # Above this many buffered bytes without a complete message, stop trying to
     # inspect and stream the rest raw (large downloads, non-HTTP tunnels, etc.).
     MAX_INSPECT_BYTES = 10 * 1024 * 1024
 
-    def _block_response(self) -> bytes:
-        html = (
-            b"<html><head><meta charset='utf-8'><title>Blocked</title></head>"
-            b"<body style='font-family:sans-serif;background:#0b0f14;color:#e6edf3;"
-            b"text-align:center;padding-top:12vh'>"
-            b"<h1 style='color:#ff5c5c'>Blocked by Bifrost N\xc3\x98X</h1>"
-            b"<p>This content was flagged by the AI firewall and was not delivered.</p>"
-            b"</body></html>"
-        )
-        return (
-            b"HTTP/1.1 403 Forbidden\r\n"
-            b"Content-Type: text/html; charset=utf-8\r\n"
-            b"Content-Length: " + str(len(html)).encode() + b"\r\n"
-            b"Connection: close\r\n\r\n" + html
-        )
+    def _block_response(self, verdict=None, *, host="", direction="outbound", client_ip="", is_https=False) -> bytes:
+        """The brand-kit block page (gateway/block_page.py). With no verdict it is the generic page. The request id
+        on the page is logged here so IT can find the block from the id a user quotes."""
+        if verdict is None:
+            return render_block_response(None)
+        info = BlockInfo.from_verdict(verdict, host=host, direction=direction, client_ip=client_ip,
+                                      is_https=is_https)
+        logger.warning(f"Block page served: id={info.request_id} host={info.host} client={client_ip} "
+                       f"direction={direction} category={info.category} reason={info.reason[:200]!r}")
+        return render_block_response(info)
 
     async def pipe(self, client_r, client_w, server_r, server_w, is_https,
                    client_ip="unknown", server_name="unknown", dest_ip="unknown", dest_port=""):
@@ -338,7 +502,8 @@ class TransparentProxy:
             if verdict == "block":
                 # Always inform the client, whichever direction tripped.
                 try:
-                    client_w.write(self._block_response())
+                    client_w.write(self._block_response(verdict, host=real_dst, direction=direction,
+                                                        client_ip=client_ip, is_https=is_https))
                     await client_w.drain()
                 except Exception:
                     pass

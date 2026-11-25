@@ -40,7 +40,7 @@ up)
     ipt filter FORWARD -i "$UPLINK" -o "$LAB_IF" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
     ipt filter INPUT   -i "$LAB_IF" -j ACCEPT
     cd "$REPO"
-    # start_network.sh calls bare python3 -> must be the venv one (zmq/requests)
+    # start_network.sh resolves the venv interpreter itself (absolute path); PATH is kept for the child tools
     env HOTSPOT_IF="$LAB_IF" INTERNET_IF="$UPLINK" PATH="$REPO/venv/bin:$PATH" ./start_network.sh
     echo; echo "UP. VM gateway = ${LAB_IP%/*}; CA cert: http://${LAB_IP%/*}:8000/ca.crt"
     ;;
@@ -52,6 +52,9 @@ down)
     ipt_del nat    PREROUTING -i "$LAB_IF" -p tcp --dport 80  -j REDIRECT --to-port 8080
     ipt_del filter FORWARD -i "$LAB_IF" -o "$UPLINK" -p udp --dport 53 -j NFQUEUE --queue-num 1 --queue-bypass
     ipt_del filter FORWARD -i "$LAB_IF" -o "$UPLINK" -p tcp --dport 21 -j NFQUEUE --queue-num 1 --queue-bypass
+    # shellcheck source=../network_inspector/quic_rule.sh
+    source "$REPO/network_inspector/quic_rule.sh"
+    unblock_quic "$LAB_IF"
     ipt_del nat    POSTROUTING -s "$LAB_NET" -o "$UPLINK" -j MASQUERADE
     ipt_del filter FORWARD -i "$LAB_IF" -o "$UPLINK" -j ACCEPT
     ipt_del filter FORWARD -i "$UPLINK" -o "$LAB_IF" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT

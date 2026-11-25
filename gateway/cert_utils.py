@@ -1,4 +1,5 @@
 import os
+import re
 import datetime
 from cryptography import x509
 from cryptography.x509.oid import NameOID
@@ -8,6 +9,17 @@ from cryptography.hazmat.primitives import serialization
 import logging
 
 logger = logging.getLogger("cert_utils")
+
+# A name usable as a certificate file stem and DNS name: letters, digits, '-', '_' and '.' only, each label
+# 1-63 chars, no leading/trailing dot or hyphen, 253 chars at most. The host comes from the client's TLS SNI
+# (or the destination IP), so it is attacker controlled and must never reach a file path unchecked.
+_LABEL = r"[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?"
+_HOST_RE = re.compile(rf"{_LABEL}(?:\.{_LABEL})*")
+
+
+def is_valid_cert_host(host) -> bool:
+    return isinstance(host, str) and 0 < len(host) <= 253 and _HOST_RE.fullmatch(host) is not None
+
 
 class CertificateAuthority:
     def __init__(self, cert_dir="gateway/certs"):
@@ -84,9 +96,18 @@ class CertificateAuthority:
         logger.info(f"CA Generated at {self.cert_dir}")
 
     def get_certificate_for_host(self, host: str):
-        """Generate a leaf certificate for a specific host, signed by our CA."""
+        """Generate a leaf certificate for a specific host, signed by our CA.
+
+        Raises ValueError for a name that is not a plain hostname / IP literal (path separators, '..', NUL,
+        over-long labels...), and never touches a path outside the certificate directory."""
+        if not is_valid_cert_host(host):
+            raise ValueError(f"refusing to issue a certificate for invalid host name {host!r}"[:200])
         cert_path = os.path.join(self.cert_dir, f"{host}.crt")
         key_path = os.path.join(self.cert_dir, f"{host}.key")
+        root = os.path.realpath(self.cert_dir)
+        for path in (cert_path, key_path):                 # belt and braces on top of the name check
+            if os.path.dirname(os.path.realpath(path)) != root:
+                raise ValueError(f"certificate path for {host!r} escapes the certificate directory")
         
         # In a real dynamic proxy, we might keep keys in memory or reuse a single wildcard key for efficiency.
         # For simplicity, we generate per host.

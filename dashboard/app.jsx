@@ -135,8 +135,7 @@ const App = () => {
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark"/>
-          <div className="brand-name">AI Firewall</div>
-          <div className="brand-env">FYP</div>
+          <div className="brand-name" role="img" aria-label="Bifrost NØX"/>
         </div>
         <div className="nav-section">
           <div className="nav-label">Monitoring</div>
@@ -165,8 +164,7 @@ const App = () => {
       <div className="topbar-alt">
         <div className="brand">
           <div className="brand-mark"/>
-          <div className="brand-name">AI Firewall</div>
-          <div className="brand-env">FYP</div>
+          <div className="brand-name" role="img" aria-label="Bifrost NØX"/>
         </div>
         <div className="tnav">
           {navWithCounts.map(n => (
@@ -178,7 +176,7 @@ const App = () => {
       <main className="main">
         <div className="topbar">
           <div className="crumbs">
-            <span>AI Firewall</span>
+            <span>Bifrost NØX</span>
             <span className="sep">/</span>
             <span className="cur">{curNav?.label}</span>
           </div>

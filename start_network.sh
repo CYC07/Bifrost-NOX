@@ -14,6 +14,18 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
+# Everything below uses repo-relative paths; make that true wherever the script is called from.
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$REPO_DIR" || exit 1
+# shellcheck source=network_inspector/venv_python.sh
+source "$REPO_DIR/network_inspector/venv_python.sh"
+source "$REPO_DIR/network_inspector/quic_rule.sh"
+
+# Absolute venv interpreter, resolved BEFORE any firewall rule is touched: under sudo a bare python3 is the
+# system one, which has no zmq (the brain died at import and the engine then stalled DNS). To use another
+# interpreter run:  sudo PYTHON=/abs/path/to/python ./start_network.sh   (sudo resets the environment otherwise)
+PYTHON="$(resolve_venv_python "$REPO_DIR")" || exit 1
+
 # Auto-detect which wlan is in AP mode if not supplied by caller.
 _ap_iface=""
 for _iface in "${HOTSPOT_IF:-wlan1}" wlan0 wlan1; do
@@ -57,6 +69,11 @@ echo "[2/3] Installing FORWARD NFQUEUE traps ($HOTSPOT_IF -> $INTERNET_IF) on qu
 add_fwd_rule udp 53   # DNS
 add_fwd_rule tcp 21   # FTP
 
+# QUIC (HTTP/3, UDP 443) is not covered by the TCP redirect below: a browser that has learned a site supports HTTP/3
+# would talk to it directly and nothing would be inspected. Refuse it so browsers fall back to TCP (BLOCK_QUIC=0 = off).
+echo "Refusing QUIC (UDP 443) from $HOTSPOT_IF so browsers fall back to inspected TCP..."
+block_quic "$HOTSPOT_IF"
+
 # Transparent proxy redirect for hotspot HTTPS/HTTP -> gateway on 8080.
 # Idempotent: only added if missing.
 echo "Redirecting hotspot HTTPS/HTTP to gateway (127.0.0.1:8080)..."
@@ -69,10 +86,16 @@ echo "Network layer rules applied (hotspot NAT/FORWARD from wifi-hotspot.sh is p
 
 echo "[3/3] Starting inspection engine..."
 echo "  -> AI Brain (ZMQ bridge)"
-nohup python3 network_inspector/ai_brain.py > brain.log 2>&1 &
+echo "     python: $PYTHON"
+nohup "$PYTHON" network_inspector/ai_brain.py > brain.log 2>&1 &
 BRAIN_PID=$!
 echo "     PID: $BRAIN_PID"
 sleep 1
+if ! kill -0 "$BRAIN_PID" 2>/dev/null; then
+    echo "ERROR: AI Brain exited during startup; not starting the engine. Last lines of brain.log:" >&2
+    tail -n 15 brain.log >&2
+    exit 1
+fi
 
 echo "  -> C++ Firewall Engine (binds NFQUEUE $QUEUE_NUM)"
 # Background so callers (start_all.sh) aren't blocked. Stop via stop_all.sh

@@ -172,43 +172,23 @@ input, select, textarea { font-family: inherit; color: inherit; }
   border-bottom: 1px solid var(--border);
   height: var(--topbar-h);
 }
+/* Bifrost NØX symbol: ink on the light theme, paper on the dark theme (swapped by the data-theme attribute). */
 .brand-mark {
-  width: 22px; height: 22px;
-  border-radius: 5px;
-  background: var(--ink);
-  position: relative;
+  width: 26px; height: 26px;
+  background: url("assets/bifrost-nox-symbol-small-ink.svg") center / contain no-repeat;
   flex-shrink: 0;
 }
-.brand-mark::before {
-  content: '';
-  position: absolute;
-  inset: 5px;
-  border: 1.5px solid var(--bg);
-  border-radius: 2px;
+[data-theme="dark"] .brand-mark {
+  background-image: url("assets/bifrost-nox-symbol-small-paper.svg");
 }
-.brand-mark::after {
-  content: '';
-  position: absolute;
-  left: 50%; top: 5px; bottom: 5px;
-  width: 1.5px;
-  background: var(--bg);
-  transform: translateX(-50%);
-}
+/* Bifrost NØX wordmark (drawn outlines, 721.77 x 80.06 viewBox): ink on the light theme, paper on the dark theme. */
 .brand-name {
-  font-weight: 700;
-  letter-spacing: -0.01em;
-  font-size: 15px;
+  width: 108px; height: 12px;
+  background: url("assets/bifrost-nox-wordmark-ink.svg") left center / contain no-repeat;
+  flex-shrink: 0;
 }
-.brand-env {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  letter-spacing: 0.04em;
-  color: var(--ink-3);
-  padding: 2px 6px;
-  background: var(--bg-sunken);
-  border-radius: 4px;
-  border: 1px solid var(--border);
-  margin-left: auto;
+[data-theme="dark"] .brand-name {
+  background-image: url("assets/bifrost-nox-wordmark-paper.svg");
 }
 
 .nav-section {

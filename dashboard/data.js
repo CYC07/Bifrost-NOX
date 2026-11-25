@@ -217,14 +217,63 @@
       const r = await fetch(API + '/allowlist/' + encodeURIComponent(host), { method: 'DELETE' });
       return r.json().catch(() => ({ ok: false }));
     },
+    // Returns { ok:true, httpStatus, verdict } or { ok:false, httpStatus, error }. An HTTP error (for example the
+    // orchestrator's 403 for a non-local client) is a FAILURE, never a verdict: it used to be read as "indexed".
     async upload(file, contentType) {
       const fd = new FormData();
       fd.append('content_type', contentType);
       fd.append('source_ip', 'dashboard');
       fd.append('destination_ip', 'ai-intake');
       fd.append('file', file);
-      const r = await fetch(API + '/analyze_traffic', { method: 'POST', body: fd });
-      return r.json().catch(() => ({}));
+      let r;
+      try {
+        r = await fetch(API + '/analyze_traffic', { method: 'POST', body: fd });
+      } catch (e) {
+        return { ok: false, httpStatus: 0, error: 'Could not reach the firewall: ' + ((e && e.message) || e) };
+      }
+      const body = await r.json().catch(() => null);
+      if (!r.ok) return { ok: false, httpStatus: r.status, error: (body && (body.error || body.detail)) || ('HTTP ' + r.status) };
+      if (!body || typeof body !== 'object') return { ok: false, httpStatus: r.status, error: 'The firewall returned an empty answer (HTTP ' + r.status + ')' };
+      return { ok: true, httpStatus: r.status, verdict: body };
+    },
+  };
+
+  // AI Intake row helpers (pure: unit-tested with node in tests/test_dashboard_intake.py).
+  // Server rows come from GET /uploads; "local" rows exist only in the browser while an upload is in flight or after it failed.
+  FW.intake = {
+    failureMessage(res) {
+      const err = (res && res.error) || 'unknown error';
+      if (res && res.httpStatus === 403) return 'Not accepted (403): open the dashboard from this machine (localhost) or set FIREWALL_ADMIN_TOKEN. Server said: ' + err;
+      if (res && res.httpStatus > 0) return 'Not accepted (HTTP ' + res.httpStatus + '): ' + err;
+      return err;
+    },
+    pendingRow(info) {
+      return { name: info.name, size: info.size, type: info.type, status: 'analyzing', time: 'just now', tags: ['Uploading…'], local: true, state: 'pending' };
+    },
+    failedRow(info, res) {
+      return { name: info.name, size: info.size, type: info.type, status: 'error', time: 'just now', tags: [FW.intake.failureMessage(res)], local: true, state: 'failed' };
+    },
+    merge(local, backend) {
+      const keep = (local || []).filter(r => r && r.local && r.state !== 'done');
+      return keep.concat(backend || []);
+    },
+    tone(status) {
+      return status === 'indexed' ? 'ok' : (status === 'flagged' || status === 'error' || status === 'failed') ? 'danger' : 'warn';
+    },
+    counts(items) {
+      const c = { total: 0, indexed: 0, review: 0, flagged: 0, error: 0, analyzing: 0 };
+      (items || []).forEach(i => { c.total++; if (c[i.status] !== undefined) c[i.status]++; });
+      return c;
+    },
+    detailLines(row) {
+      const d = row && row.detail;
+      if (!d) return [];
+      const lines = [];
+      if (d.error) lines.push('Not analysed: ' + d.error);
+      if (d.reason) lines.push('Verdict: ' + d.reason + (d.risk ? ' (risk ' + d.risk + ')' : ''));
+      (d.findings || []).forEach(f => lines.push('• ' + f));
+      Object.entries(d.scores || {}).forEach(([k, v]) => lines.push('score ' + k + ' = ' + v));
+      return lines;
     },
   };
 

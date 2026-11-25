@@ -7,6 +7,7 @@ import os
 import asyncio
 import httpx
 from mitm_engine import TransparentProxy
+from block_page import BlockVerdict
 
 # Ensure we can import from common
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -40,6 +41,15 @@ def _doc_max_bytes() -> int:
         return int(os.environ.get("DOC_SCAN_MAX_BYTES", str(20 * 1024 * 1024)))
     except ValueError:
         return 20 * 1024 * 1024
+
+
+def _timeout_env(name: str, default: float) -> float:
+    """Seconds from the environment; unusable (garbage, zero, negative) -> the default."""
+    try:
+        value = float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
 
 
 def _has_field_content(body: bytes) -> bool:
@@ -84,10 +94,13 @@ class IDPInspector:
         except Exception:
             pass
 
-    async def log_block(self, src_ip, dst_ip, dst_port, host, reason):
-        """Fire-and-forget BLOCK event. Used when MITM cannot complete
-        (e.g. cert pinning on WhatsApp/Snapchat) so the operator sees why
-        the connection died and knows to allowlist the host if intentional."""
+    async def log_block(self, src_ip, dst_ip, dst_port, host, reason, rule="PINNED-TLS", status="block"):
+        """Fire-and-forget event for a connection the proxy could not complete.
+
+        Default: a BLOCK labelled PINNED-TLS, used when the client rejects our certificate (WhatsApp,
+        Snapchat...) so the operator knows to allowlist the host if intentional. UPSTREAM-FAIL events
+        pass status="allow": the origin server was unreachable, the firewall did not block anything,
+        and counting it as a block would inflate the threat numbers."""
         try:
             await self.client.post(
                 MASTER_LOG_URL,
@@ -95,10 +108,10 @@ class IDPInspector:
                     "source_ip": src_ip,
                     "destination_ip": host or dst_ip,
                     "port": str(dst_port),
-                    "status": "block",
-                    "risk_level": "high",
+                    "status": status,
+                    "risk_level": "high" if status == "block" else "safe",
                     "reason": reason,
-                    "rule": "PINNED-TLS",
+                    "rule": rule,
                 },
                 timeout=1.0,
             )
@@ -127,7 +140,7 @@ class IDPInspector:
             if tool:
                 if scanner_policy() == "block":
                     logger.warning(f"BLOCK: scanner tool '{tool}' ({src_ip} -> {dst_ip}:{dst_port} {method} {host}).")
-                    return "block"
+                    return BlockVerdict(f"scanner tool '{tool}'", category="Scanner Tool", detector="scanner-ua")
                 logger.warning(f"ADVISORY: scanner tool '{tool}' ({src_ip} -> {dst_ip}:{dst_port} {method} {host}).")
 
         # Scanner BEHAVIOUR (works even when the User-Agent is spoofed): a client whose requests to one host mostly
@@ -143,7 +156,8 @@ class IDPInspector:
                 if why:
                     if scanner_behaviour_policy() == "block":
                         logger.warning(f"BLOCK: scanner behaviour ({src_ip} -> {site}): {why}.")
-                        return "block"
+                        return BlockVerdict(f"scanner behaviour: {why}", category="Scanner Behaviour",
+                                            detector="scanner-behaviour")
                     logger.warning(f"ADVISORY: scanner behaviour ({src_ip} -> {site}): {why}.")
                 self.scanner_tracker.observe_request(src_ip, site, path)
 
@@ -156,7 +170,7 @@ class IDPInspector:
                                        host=host, method=method, path=path, kind="url")
             if tv.get("status") == "block":
                 logger.warning(f"BLOCK AI target ({src_ip} -> {dst_ip}): {tv.get('reason')}")
-                return "block"
+                return BlockVerdict(tv.get("reason") or "")
 
         if not body: return "allow"
 
@@ -174,12 +188,12 @@ class IDPInspector:
         # 1. SECURITY: Executable
         if detected_type == "executable":
             logger.warning(f"BLOCK: Executable detected ({src_ip} -> {dst_ip}).")
-            return "block"
+            return BlockVerdict("Executable detected", category="Executable File", detector="file-type check")
 
         # 1a. SECURITY: legacy Office binary (.doc/.xls/.ppt) - blocked outright (LEGACY_OFFICE_POLICY).
         if detected_type == "legacy_office" and _legacy_office_policy() == "block":
             logger.warning(f"BLOCK: Legacy Office binary (OLE2 .doc/.xls/.ppt) ({src_ip} -> {dst_ip}).")
-            return "block"
+            return BlockVerdict("Legacy Office binary", category="Legacy Office File", detector="file-type check")
 
         # 1b. Uploaded files inside multipart/form-data: the whole body sniffs as text, so each file
         # part is sniffed and routed on its own (document -> document service, image -> image
@@ -189,7 +203,7 @@ class IDPInspector:
             verdict, remaining = await self._inspect_upload_parts(headers, body, direction, src_ip, dst_ip,
                                                                   dst_port, host, method, path)
             if verdict == "block":
-                return "block"
+                return verdict
             if remaining is not None:
                 if not _has_field_content(remaining):
                     return "allow"
@@ -200,7 +214,7 @@ class IDPInspector:
         # 2. SECURITY: High Entropy Text
         if detected_type == "text" and entropy > 7.5:
             logger.warning(f"BLOCK: High entropy text ({src_ip} -> {dst_ip}).")
-            return "block"
+            return BlockVerdict("High-entropy text", category="High-Entropy Content", detector="entropy check")
 
         # 3. AI Analysis
         if detected_type == "document":
@@ -221,7 +235,7 @@ class IDPInspector:
                                         host=host, method=method, path=path)
         if verdict.get("status") == "block":
             logger.warning(f"BLOCK AI ({src_ip} -> {dst_ip}): {verdict.get('reason')}")
-            return "block"
+            return BlockVerdict(verdict.get("reason") or "")
 
         return "allow"
 
@@ -239,7 +253,8 @@ class IDPInspector:
                 kind = FileSniffer.get_true_file_type(part.data)
                 if kind == "legacy_office" and _legacy_office_policy() == "block":
                     logger.warning(f"BLOCK: uploaded legacy Office binary {part.filename!r} ({src_ip} -> {dst_ip}).")
-                    return "block", None
+                    return (BlockVerdict("Uploaded legacy Office binary", category="Legacy Office File",
+                                         detector="file-type check"), None)
                 if kind not in ("document", "image") or _doc_scan_mode() == "off":
                     continue
                 logger.info(f"Inspecting uploaded {kind} part {part.filename!r} ({len(part.data)} bytes)")
@@ -247,7 +262,7 @@ class IDPInspector:
                                           host=host, method=method, path=path)
                 if v.get("status") == "block":
                     logger.warning(f"BLOCK AI upload part ({src_ip} -> {dst_ip}): {v.get('reason')}")
-                    return "block", None
+                    return BlockVerdict(v.get("reason") or ""), None
                 remaining = (body if remaining is None else remaining).replace(part.data, b"", 1)
         except Exception as exc:
             logger.warning(f"Upload part inspection failed open: {type(exc).__name__}: {exc}")
@@ -280,7 +295,8 @@ class IDPInspector:
         # verdict arrives (timeout / error / non-200): "open" (default, documented
         # fail-safe design — keep traffic flowing) or "closed" (block it). Fail-open is
         # a bypass whenever analysis is slow, so it is logged loudly either way.
-        timeout = float(os.environ.get("AI_TIMEOUT", "10.0"))
+        # Images wait their turn behind other images during a burst, so they get longer (AI_TIMEOUT_IMAGE).
+        timeout = _timeout_env("AI_TIMEOUT_IMAGE", 40.0) if c_type == "image" else _timeout_env("AI_TIMEOUT", 10.0)
         reason = ""
         try:
             resp = await self.client.post(MASTER_AI_URL, data=data, files=files, timeout=timeout)
