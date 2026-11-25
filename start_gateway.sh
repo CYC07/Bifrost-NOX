@@ -1,5 +1,6 @@
 #!/bin/bash
-source /home/cyc0logy/FYP/ai_firewall/venv/bin/activate
+cd "$(dirname "${BASH_SOURCE[0]}")" || exit 1
+source venv/bin/activate
 
 # Start mitmdump (non-interactive mitmproxy) with our script
 # Listen on 8080 by default
