@@ -112,7 +112,7 @@ else
 
     if [ -z "$_ap_iface" ]; then
         echo "  WARN: neither wlan0 nor wlan1 is in AP mode. Start the hotspot first:"
-        echo "        sudo /home/cyc0logy/wifi-hotspot.sh"
+        echo "        (an access point on wlan1, e.g. hostapd + dnsmasq; see docs/setup.md)"
         read -r -p "  Continue anyway? [y/N] " ans
         case "$ans" in y|Y|yes) ;; *) exit 1;; esac
     else

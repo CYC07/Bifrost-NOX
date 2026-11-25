@@ -47,18 +47,73 @@ Every request and response gets an `ALLOW`, `BLOCK` or advisory `CENSOR` verdict
 - **DNS filtering** in a C++ NFQUEUE engine that fails open if its Python brain stops answering.
 - **Operator tooling.** Real-time dashboard, rule engine, cert-pinned-app allowlist and a branded block page with request ids.
 
-## Quick start
+## Setup
+
+You need a Linux host with iptables (Arch, Debian, Kali and Ubuntu all work), Python 3.11+, Git LFS and about 6 GB of free RAM for the AI services. Clients reach the internet through this host: either a VirtualBox VM on a host-only network, or devices joined to a Wi-Fi hotspot the host runs.
+
+**1. Install the system packages**
 
 ```bash
-git lfs install && git clone https://github.com/CYC07/Bifrost-NOX.git && cd Bifrost-NOX
-python3 -m venv venv && source venv/bin/activate
-pip install -r requirements.txt && python -m spacy download en_core_web_lg
-make -C network_inspector/cpp                   # C++ packet engine
-(cd gateway && python3 cert_utils.py)           # local CA: install gateway/certs/ca.crt on clients
-./start_all.sh                                  # hotspot mode; the VM lab is in docs/setup.md
+# Arch
+sudo pacman -S --needed base-devel python git-lfs tesseract tesseract-data-eng \
+    libnetfilter_queue libnfnetlink zeromq cppzmq perl-image-exiftool
+# Debian / Kali / Ubuntu
+sudo apt install -y build-essential python3-dev python3-venv git-lfs tesseract-ocr \
+    libnetfilter-queue-dev libnfnetlink-dev libzmq3-dev libcppzmq-dev libimage-exiftool-perl
 ```
 
-Then open `http://localhost:8000/dashboard/`. System packages, models and the VM-lab setup are in [docs/setup.md](docs/setup.md).
+**2. Get the code and the Python dependencies**
+
+```bash
+git lfs install                                  # the WAF model is stored with Git LFS
+git clone https://github.com/CYC07/Bifrost-NOX.git && cd Bifrost-NOX
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+python -m spacy download en_core_web_lg
+```
+
+The other models (CLIP, DeBERTa, YOLOv8, about 2 GB) download automatically the first time the services start.
+
+**3. Build the packet engine and create the certificate authority**
+
+```bash
+make -C network_inspector/cpp
+(cd gateway && python3 cert_utils.py)            # creates gateway/certs/ca.crt
+```
+
+**4. Trust the CA on every client.** Once the firewall is running, download it from `http://<firewall-ip>:8000/ca.crt`, then:
+
+- Windows: `certutil -addstore -f Root ca.crt` (as administrator)
+- Android: Settings → Security → Install a certificate → CA certificate
+- Linux and macOS: add it to the system (or browser) trust store
+
+## Start
+
+**VM lab (VirtualBox).** Create a host-only network `vboxnet0` (192.168.56.1/24) and give the VM a single adapter on it. Remove any NAT adapter, or the VM's traffic bypasses the firewall. In the VM, use 192.168.56.1 as the gateway and a public DNS server such as 1.1.1.1. Then, on the host:
+
+```bash
+./start_services.sh                 # AI services + gateway (no sudo needed)
+sudo vm-lab/vm_lab.sh up            # routing, packet engine and DNS filter
+```
+
+`vm_lab.sh` reads `UPLINK` (default `wlan0`) for the host's internet interface, and `LAB_IF` / `LAB_IP` if your host-only network differs.
+
+**Wi-Fi hotspot.** Put a Wi-Fi adapter into access-point mode (for example `hostapd` and `dnsmasq` on `wlan1`) with another interface as the uplink, then:
+
+```bash
+./start_all.sh                      # services, gateway and network layer (asks for sudo)
+```
+
+Either way, the dashboard is at `http://localhost:8000/dashboard/`. To stop:
+
+```bash
+sudo vm-lab/vm_lab.sh down && sudo ./stop_all.sh     # VM lab
+sudo ./stop_all.sh                                   # hotspot
+```
+
+More detail (models, running services by hand, troubleshooting the lab) is in [docs/setup.md](docs/setup.md).
+
+## Configuration
 
 Settings are environment variables (or a `.env` file). The ones most people change:
 
@@ -69,6 +124,8 @@ Settings are environment variables (or a `.env` file). The ones most people chan
 | `VIRUSTOTAL_API_KEY` | unset | enables hash lookups for documents |
 | `FIREWALL_ADMIN_TOKEN` | unset | allows administration from another machine |
 | `BLOCK_REVIEW_URL` | unset | where the block page's "Request a review" button points |
+
+Every setting is listed in [docs/configuration.md](docs/configuration.md).
 
 ## Documentation
 
